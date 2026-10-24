@@ -1,7 +1,7 @@
 # FSMN-VAD 原生后端（C++）
 
 从 `fsmn-vad-tool` 提取的 FSMN-VAD C++ 移植（ggml 运行时，无 funasr/torch 依赖）。
-引擎使用此原生后端；运行前可用 `main.py --check-vad-runtime` 验证 DLL 和模型。
+引擎 `modules/vad/engine.py` 优先使用它；DLL 未构建时自动回退到 funasr。
 
 ## 当前状态（2026-08-15）
 
@@ -49,3 +49,6 @@ PyInstaller spec 的 `datas` 已包含整个 `modules/` 目录，GGUF 和 cpp �
 python -c "from modules.vad.native import native_available; print(native_available())"
 # True = DLL + GGUF 就绪，VAD 走原生后端（无需 funasr/torch）
 ```
+
+参考源码：`C:\Users\XTW\Desktop\fsmn-vad-tool`（含 ctypes 调用示例
+`vad_native_ctypes.py`）。

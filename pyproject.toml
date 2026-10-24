@@ -24,8 +24,6 @@ dependencies = [
 dev = [
     "librosa",
     "nuitka[onefile]",
-    "pyarmor",
-    "pyinstaller",
 ]
 
 [tool.uv]

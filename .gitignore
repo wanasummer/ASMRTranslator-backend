@@ -1,14 +1,32 @@
+# 忽略所有目录下的 __pycache__
 **/__pycache__/
-*.py[cod]
+
+# 忽略所有 .pyc 文件
+*.pyc
+
+# 忽略 node_modules 目录
+**/node_modules/
+
+# uv project-local Python environment
 .venv/
+
 *.log
-.env
-.env.*
-!.env.example
-.asmrts
-output/
-out/
+
+# Build output
 build/
-build_nuitka/
-build_staging_elec/
 modules/vad/cpp/build/
+.claude/settings.local.json
+dist
+desktop-tauri/dist/
+desktop-tauri/.env.local
+desktop-tauri/src-tauri/target/
+build_staging_elec
+build_staging_py
+build_py_spec
+build_py_work
+build_nuitka
+
+.reasonix
+
+# Local user configuration
+.asmrts

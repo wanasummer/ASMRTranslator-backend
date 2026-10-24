@@ -6,8 +6,7 @@
  * Output:
  *   build_staging_elec/resources/main.exe
  *
- * This script is intentionally independent from scripts/build.js so the
- * existing Electron PyArmor/PyInstaller pipeline remains unchanged.
+ * This is the backend packaging step used by the Tauri installer workflow.
  */
 
 const { spawnSync } = require("child_process");
@@ -104,6 +103,9 @@ function main() {
   removeDirectory(OUTPUT_DIR);
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   fs.mkdirSync(RESOURCE_DIR, { recursive: true });
+  const logDefaults = path.join(OUTPUT_DIR, "_log_upload_defaults.json");
+  run("uv", ["run", "--frozen", "python", "scripts/prepare_log_defaults.py",
+    "--output", logDefaults]);
 
   const nuitkaArgs = [
     "run",
@@ -143,6 +145,7 @@ function main() {
     `--include-data-files=${path.join(UNIDIC_DIR, "char.bin")}=unidic_lite/dicdir/char.bin`,
     `--include-data-files=${path.join(UNIDIC_DIR, "matrix.bin")}=unidic_lite/dicdir/matrix.bin`,
     `--include-data-files=${GGUF}=modules/vad/model/fsmn-vad.gguf`,
+    `--include-data-files=${logDefaults}=modules/_log_upload_defaults.json`,
     `--user-package-configuration-file=${PACKAGE_CONFIG}`,
     `--report=${path.join(OUTPUT_DIR, "compilation-report.xml")}`,
   ];

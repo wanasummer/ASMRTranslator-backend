@@ -43,12 +43,9 @@ class LogUploader(Protocol):
 class HttpLogUploader:
     endpoint: str
     timeout_seconds: float = 2.5
-    write_token: str = ""
 
     def upload(self, report: str) -> None:
         headers = {"Content-Type": "text/plain; charset=utf-8"}
-        if self.write_token:
-            headers["Authorization"] = f"Bearer {self.write_token}"
         request = Request(
             self.endpoint,
             data=report.encode("utf-8"),
@@ -109,6 +106,20 @@ def build_error_report(
     return redact_log_text("\n".join(sections))
 
 
+def _build_log_defaults() -> dict[str, str]:
+    """Read optional values embedded by CI, never a user configuration file."""
+    if not _is_packaged():
+        return {}
+    try:
+        payload = json.loads(Path(__file__).with_name("_log_upload_defaults.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items()
+            if key == "ASMR_LOG_UPLOAD_URL" and isinstance(value, str)}
+
+
 def report_error_async(
     error: PipelineError,
     traceback_text: str,
@@ -125,14 +136,14 @@ def report_error_async(
     env = os.environ if environ is None else environ
     if env.get("ASMR_DISABLE_LOG_UPLOAD", "").strip().lower() in {"1", "true", "yes"}:
         return None
-    endpoint = env.get("ASMR_LOG_UPLOAD_URL", DEFAULT_LOG_UPLOAD_URL).strip()
+    defaults = _build_log_defaults()
+    endpoint = env.get("ASMR_LOG_UPLOAD_URL", defaults.get("ASMR_LOG_UPLOAD_URL", DEFAULT_LOG_UPLOAD_URL)).strip()
     if not endpoint and uploader is None:
         return None
     def _worker() -> None:
         try:
             selected = uploader or HttpLogUploader(
                 endpoint=endpoint,
-                write_token=env.get("ASMR_LOG_WRITE_TOKEN", ""),
             )
             report = build_error_report(error, traceback_text, environ=env)
             selected.upload(report)
