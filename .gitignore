@@ -30,3 +30,10 @@ build_nuitka
 
 # Local user configuration
 .asmrts
+
+# Private environment and generated task output
+.env
+.env.*
+!.env.example
+output/
+out/

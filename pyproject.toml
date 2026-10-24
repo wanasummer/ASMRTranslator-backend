@@ -3,6 +3,8 @@ name = "asmr-translator"
 version = "1.5.7"
 description = "日文 ASMR 转中文配音桌面工具"
 readme = "README.md"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "chardet>=5.2,<6",

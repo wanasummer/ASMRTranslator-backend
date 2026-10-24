@@ -15,7 +15,9 @@ const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUTPUT_DIR = path.join(ROOT, "build_nuitka");
-const RESOURCE_DIR = path.join(ROOT, "build_staging_elec", "resources");
+const RESOURCE_DIR = process.env.ASMR_SIDECAR_RESOURCE_DIR
+  ? path.resolve(process.env.ASMR_SIDECAR_RESOURCE_DIR)
+  : path.join(ROOT, "build_staging_elec", "resources");
 const BUILT_EXE = path.join(OUTPUT_DIR, "main.exe");
 const SIDECAR = path.join(RESOURCE_DIR, "main.exe");
 const PACKAGE_CONFIG = path.join(ROOT, "nuitka-package.config.yml");
