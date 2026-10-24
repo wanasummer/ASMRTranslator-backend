@@ -1,0 +1,14 @@
+**/__pycache__/
+*.py[cod]
+.venv/
+*.log
+.env
+.env.*
+!.env.example
+.asmrts
+output/
+out/
+build/
+build_nuitka/
+build_staging_elec/
+modules/vad/cpp/build/

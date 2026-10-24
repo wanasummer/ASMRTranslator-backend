@@ -1,0 +1,12 @@
+# Project-specific Nuitka package configuration.
+# The VAD runtime loads this DLL dynamically with ctypes, so Nuitka cannot
+# discover it from the Python import graph.
+- module-name: "modules.vad.native"
+  dlls:
+    - from_filenames:
+        relative_path: "native"
+        prefixes:
+          - "fsmn_vad"
+        suffixes:
+          - "dll"
+      when: "win32"

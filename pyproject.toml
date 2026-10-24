@@ -1,0 +1,32 @@
+[project]
+name = "asmr-translator"
+version = "1.5.7"
+description = "日文 ASMR 转中文配音桌面工具"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "chardet>=5.2,<6",
+    "aiohttp>=3.10,<4",
+    "aiohttp-socks>=0.10,<0.12",
+    "edge-tts",
+    "httpx[socks]",
+    "PyYAML>=6,<7",
+    "jsonschema>=4.23,<5",
+    "mecab-python3",
+    "mutagen>=1.47,<2",
+    "numpy",
+    "pydub",
+    "pykakasi",
+    "unidic-lite",
+]
+
+[dependency-groups]
+dev = [
+    "librosa",
+    "nuitka[onefile]",
+    "pyarmor",
+    "pyinstaller",
+]
+
+[tool.uv]
+package = false
