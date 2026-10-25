@@ -187,7 +187,9 @@ class JointVadSentenceAligner:
         )
 
 
-ALIGNERS = {"joint-vad": JointVadSentenceAligner}
+from .qwen_aligner import QwenForceAlignSentenceAligner
+
+ALIGNERS = {"joint-vad": JointVadSentenceAligner, "qwen-force-align": QwenForceAlignSentenceAligner}
 
 
 def create_sentence_aligner(

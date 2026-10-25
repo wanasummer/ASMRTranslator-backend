@@ -5,7 +5,7 @@ from ..vad.contracts import VadRegion
 
 
 class NativeVadAtomDetector:
-    def __init__(self, audio_path: str, *, loader=None, native_factory=None):
+    def __init__(self, audio_path: str, config=None, *, loader=None, native_factory=None):
         self.audio_path = audio_path
         self.loader = loader
         self.native_factory = native_factory
@@ -34,11 +34,26 @@ class NativeVadAtomDetector:
             raise DetectError("DETECT_ALIGNMENT_FAILED", "Native VAD atom detection failed") from exc
 
 
-ATOM_DETECTORS = {"native-vad": NativeVadAtomDetector}
+class ASMRVadAtomDetector:
+    def __init__(self, audio_path, config):
+        from ..vad.plugin import ASMRPluginVAD
+        self.audio_path = audio_path
+        self.engine = ASMRPluginVAD({"endpoint": config.vad_endpoint, "threshold": config.vad_threshold,
+                                     "max_single_segment_time": 300000})
+
+    def detect(self, parent, threshold_ms):
+        start, end = parent.speech_start_ms, parent.speech_end_ms
+        regions = self.engine.detect_sync(self.audio_path, start_ms=start, end_ms=end, silence_ms=threshold_ms)
+        return tuple(VadRegion(f"{parent.id}-asmr-atom-{index}", start + round(row.start * 1000),
+                              start + round(row.end * 1000), "detect-stage", threshold_ms)
+                     for index, row in enumerate(regions))
 
 
-def create_atom_detector(name: str, audio_path: str) -> SpeechAtomDetector:
+ATOM_DETECTORS = {"native-vad": NativeVadAtomDetector, "asmr-vad": ASMRVadAtomDetector}
+
+
+def create_atom_detector(name: str, audio_path: str, config=None) -> SpeechAtomDetector:
     try:
-        return ATOM_DETECTORS[name](audio_path)
+        return ATOM_DETECTORS[name](audio_path, config)
     except KeyError as exc:
         raise DetectError("DETECT_IMPLEMENTATION_UNKNOWN", f"Unknown atom detector: {name}") from exc

@@ -11,7 +11,7 @@ from .stage import DefaultDetectStage
 
 def create_detect_stage(config: DetectConfig, audio_path: str) -> DetectStage:
     sentence_detector = create_sentence_detector(config.sentence_detector)
-    atom_detector = create_atom_detector(config.atom_detector, audio_path)
+    atom_detector = create_atom_detector(config.atom_detector, audio_path, config)
     estimator = create_duration_estimator(config.duration_estimator)
     partitioner = create_region_partitioner(config.region_partitioner, config)
     dependencies = AlignmentDependencies(

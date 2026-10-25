@@ -237,7 +237,7 @@ Examples:
                              '"api_key":"...","model":"gpt-4o-mini"}. When provided, the '
                              'parsed subtitles are optimized before TTS.')
     parser.add_argument("--asr-backend", type=str, default="fish-asr",
-                        choices=["fish-asr", "qwen-audio-3.1-asr-flash", "fun-asr", "mimo-asr", "chickenrice", "common-asr"],
+                        choices=["fish-asr", "qwen-audio-3.1-asr-flash", "fun-asr", "mimo-asr", "chickenrice", "common-asr", "moss-transcribe-diarize"],
                         help="ASR engine used to generate subtitles when no VTT "
                              "file is provided (default: fish-asr)")
     parser.add_argument("--asr-kwargs", type=str, default=None,
@@ -256,6 +256,10 @@ Examples:
                         help="Enable Japanese sentence detection after ASR and before cleanup")
     parser.add_argument("--sentence-aligner", type=str, default="joint-vad",
                         help="Detect-stage sentence aligner implementation (default: joint-vad)")
+    parser.add_argument("--qwen-align-endpoint", default="http://127.0.0.1:8007")
+    parser.add_argument("--vad-backend", choices=["fsmn-vad", "asmr-vad"], default="fsmn-vad")
+    parser.add_argument("--vad-endpoint", default="http://127.0.0.1:8006")
+    parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--sentence-detector", type=str, default="mecab-japanese",
                         help="Detect-stage Japanese sentence detector (default: mecab-japanese)")
     parser.add_argument("--no-vad", action="store_true",
@@ -653,6 +657,10 @@ Examples:
         vad_enabled=not args.no_vad,
         detect_enabled=args.detect_stage,
         sentence_aligner=args.sentence_aligner,
+        qwen_align_endpoint=args.qwen_align_endpoint,
+        vad_backend=args.vad_backend,
+        vad_endpoint=args.vad_endpoint,
+        vad_threshold=args.vad_threshold,
         sentence_detector=args.sentence_detector,
         vad_max_end_silence_time=args.vad_max_end_silence_time,
         vad_max_single_segment_time=args.vad_max_single_segment_time,

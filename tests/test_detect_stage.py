@@ -323,7 +323,7 @@ class DetectStageTests(unittest.TestCase):
         self.assertIsInstance(stage, DefaultDetectStage)
         self.assertEqual(stage.aligner.audio_path, "source.wav")
         with self.assertRaisesRegex(DetectError, "DETECT_IMPLEMENTATION_UNKNOWN"):
-            create_detect_stage(DetectConfig(aligner="qwen-force-align"), "unused.wav")
+            create_detect_stage(DetectConfig(aligner="unknown-aligner"), "unused.wav")
 
     def test_eligibility_is_beta_gated_but_does_not_depend_on_llm(self):
         args = dict(

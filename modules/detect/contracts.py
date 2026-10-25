@@ -157,6 +157,9 @@ class AlignmentDependencies:
 class DetectConfig:
     sentence_detector: str = "mecab-japanese"
     aligner: str = "joint-vad"
+    qwen_endpoint: str = "http://127.0.0.1:8007"
+    vad_endpoint: str = "http://127.0.0.1:8006"
+    vad_threshold: float = 0.5
     atom_detector: str = "native-vad"
     duration_estimator: str = "japanese-mora"
     region_partitioner: str = "joint-dynamic-programming"

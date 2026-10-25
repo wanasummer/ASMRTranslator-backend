@@ -1,4 +1,4 @@
-"""VAD engines — ``FSMNVAD`` (native C++ backend) and the ``NoOpVAD`` fallback.
+"""Native FSMN and external ASMR VAD engines, plus the unavailable fallback.
 
 VAD runs entirely through the bundled native component (``modules/vad/native``):
 a ctypes wrapper around the compiled ``fsmn_vad.dll`` (C++ port of FSMN-VAD,
@@ -133,11 +133,17 @@ def create_vad(cfg: dict) -> VADEngine:
 
     Returns a ``NoOpVAD`` (``available=False``) when VAD is disabled in the
     config or the native component (fsmn_vad.dll / fsmn-vad.gguf) is missing
-    or fails to load. It never raises — the caller decides what to do with an
-    unavailable engine.
+    or fails to load. Plugin configuration errors are raised at construction;
+    remote inference errors are raised by the selected adapter.
     """
     if not cfg.get("enabled", True):
         return NoOpVAD("vad.enabled=false")
+    backend = cfg.get("backend", "fsmn-vad")
+    if backend == "asmr-vad":
+        from .plugin import ASMRPluginVAD
+        return ASMRPluginVAD(cfg)
+    if backend != "fsmn-vad":
+        raise ValueError(f"Unknown VAD backend: {backend}")
     try:
         return FSMNVAD(
             model=cfg.get("model", "fsmn-vad"),

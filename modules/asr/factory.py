@@ -6,6 +6,7 @@ from .chickenrice_adapter import ChickenRiceASRAdapter
 from .common_asr_adapter import CommonASRAdapter
 from .qwen_asr_adapter import FunASRAdapter, QwenAudio31ASRFlashAdapter
 from .mimo_asr_adapter import MimoASRAdapter
+from .moss_adapter import MossASRAdapter
 
 
 # Registry of available backends — add new ones here
@@ -16,6 +17,7 @@ _BUILTIN_BACKENDS: dict[str, type[ASRAdapter]] = {
     "qwen-audio-3.1-asr-flash": QwenAudio31ASRFlashAdapter,
     "fun-asr": FunASRAdapter,
     "mimo-asr": MimoASRAdapter,
+    "moss-transcribe-diarize": MossASRAdapter,
 }
 
 _registry: dict[str, type[ASRAdapter]] = {}

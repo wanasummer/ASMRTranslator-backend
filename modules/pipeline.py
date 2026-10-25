@@ -187,8 +187,8 @@ def _write_optimized_subtitles(output_dir: str, blocks) -> str:
 def _write_asr_subtitles(output_dir: str, blocks) -> str:
     """Write the raw ASR-generated blocks as a standalone WebVTT file.
 
-    Lands under ``output_dir/asr_subtitles/raw.vtt``. Unlike the
-    optimized export there is no speaker prefix — ASR output has no speaker info.
+    Lands under ``output_dir/asr_subtitles/raw.vtt``. Native speaker labels
+    are retained as prefixes so exports and cache reloads keep diarization.
     """
     path = os.path.join(
         intermediate_dir(output_dir, "asr_subtitles"), "raw.vtt"
@@ -199,7 +199,7 @@ def _write_asr_subtitles(output_dir: str, blocks) -> str:
         lines.append(
             f"{_format_vtt_timestamp(b.start_ms)} --> {_format_vtt_timestamp(b.end_ms)}"
         )
-        lines.append(b.text or "")
+        lines.append(f"{b.speaker}：{b.text or ''}" if b.speaker else b.text or "")
         lines.append("")
     write_text(path, "\n".join(lines))
     return path
@@ -354,12 +354,20 @@ def run_pipeline(
     vad_split_overlap_sec: float = 4.0,
     vad_sentence_realignment_beta: bool = False,
     sentence_aligner: str = "joint-vad",
+    qwen_align_endpoint: str = "http://127.0.0.1:8007",
+    vad_backend: str = "fsmn-vad",
+    vad_endpoint: str = "http://127.0.0.1:8006",
+    vad_threshold: float = 0.5,
     sentence_detector: str = "mecab-japanese",
     detect_enabled: Optional[bool] = None,
 ) -> dict:
     from .detect import DetectConfig, create_detect_stage, detect_eligible
     from .vad.stage import run_analysis_stage
-    detect_config = DetectConfig(aligner=sentence_aligner,
+    if not 0 < vad_threshold < 1:
+        raise ValueError("VAD threshold must be between 0 and 1")
+    detect_config = DetectConfig(aligner=sentence_aligner, qwen_endpoint=qwen_align_endpoint,
+                                 atom_detector="asmr-vad" if vad_backend == "asmr-vad" else "native-vad",
+                                 vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
                                  sentence_detector=sentence_detector)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
     detect_stage = None
@@ -425,6 +433,7 @@ def run_pipeline(
         # ---- Step 1 ----
         ps("Preparing subtitles (VTT / ASR)...")
         asr_output_language = None
+        asr_preserve_timeline = False
 
         from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
         asr_cache_key = None
@@ -432,8 +441,8 @@ def run_pipeline(
             asr_cache_key = cache_key({
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner,
-                "detect": [detect_enabled, sentence_aligner, sentence_detector],
-                "vad": [vad_enabled, vad_max_end_silence_time, vad_max_single_segment_time,
+                "detect": [detect_enabled, sentence_aligner, sentence_detector, qwen_align_endpoint],
+                "vad": [vad_enabled, vad_backend, vad_endpoint, vad_threshold, vad_max_end_silence_time, vad_max_single_segment_time,
                         vad_min_sec, vad_target_min_sec, vad_target_max_sec, vad_max_sec,
                         vad_max_merge_gap_sec, vad_split_window_sec, vad_split_overlap_sec],
             })
@@ -441,6 +450,9 @@ def run_pipeline(
         if cached_asr is not None:
             print_progress("asr", "正在恢复字幕缓存", 0, 1)
             blocks, asr_output_language, cached_asr_path = cached_asr
+            if asr_cache_key:
+                cached_metadata = JsonResultCache(os.path.join(output_dir, "asr_stage_results")).load(asr_cache_key) or {}
+                asr_preserve_timeline = cached_metadata.get("preserve_source_timeline") is True
             print(f"       [cached-asr] 复用 {len(blocks)} 个字幕块: {cached_asr_path}")
             print_progress("asr", "正在恢复字幕缓存", 1, 1)
         elif vtt_path:
@@ -461,6 +473,9 @@ def run_pipeline(
             # engine config passed here carries only the ASR/transcription knobs.
             vad_cfg = {
                 "enabled": vad_enabled,
+                "backend": vad_backend,
+                "endpoint": vad_endpoint,
+                "threshold": vad_threshold,
                 "max_end_silence_time": vad_max_end_silence_time,
                 "max_single_segment_time": vad_max_single_segment_time,
                 "min_sec": vad_min_sec,
@@ -507,7 +522,10 @@ def run_pipeline(
                         )
                         print("       [asr] 整段音频未识别到文字，按空字幕继续")
                     else:
+                        from .asr.document_artifacts import write_document_artifacts
+                        write_document_artifacts(result, output_dir)
                         blocks = result.blocks
+                        asr_preserve_timeline = getattr(result, "preserve_source_timeline", False) is True
                         asr_output_language = result.language
                         print(f"       [asr] 服务来源 {result.source}，时间轴 {result.timeline_source}")
                 else:
@@ -558,11 +576,13 @@ def run_pipeline(
                 raise ValueError(f"ASR 返回了不支持的语言：{asr_output_language}")
 
             if asr_cache_key:
+                asr_preserve_timeline = asr_preserve_timeline or detect_stage is not None
                 filename = "raw.vtt" if asr_output_language == "zh" else "cleaned.vtt"
                 cached_path = os.path.join(output_dir, "asr_subtitles", filename)
                 if os.path.isfile(cached_path):
                     JsonResultCache(os.path.join(output_dir, "asr_stage_results")).save(
-                        asr_cache_key, {"sha256": file_digest(cached_path)})
+                        asr_cache_key, {"sha256": file_digest(cached_path),
+                                        "preserve_source_timeline": asr_preserve_timeline})
 
         speakers = set(b.speaker for b in blocks if b.speaker)
         if speakers:
@@ -584,7 +604,7 @@ def run_pipeline(
             else:
                 from .llm_enhancer import enhance_asr_blocks
                 blocks, enhance_stats = enhance_asr_blocks(
-                    blocks, llm_ctx, preserve_source_timeline=detect_stage is not None,
+                    blocks, llm_ctx, preserve_source_timeline=detect_stage is not None or asr_preserve_timeline,
                     output_dir=output_dir)
 
         if not blocks:

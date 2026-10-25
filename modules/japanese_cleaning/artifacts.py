@@ -27,7 +27,7 @@ def write_cleaning_artifacts(result: JapaneseCleaningResult, output_dir: str) ->
         lines.extend([
             str(block.index + 1),
             f"{_timestamp(block.start_ms)} --> {_timestamp(block.end_ms)}",
-            block.text or "",
+            f"{block.speaker}：{block.text or ''}" if block.speaker else block.text or "",
             "",
         ])
     write_text(vtt_path, "\n".join(lines))
