@@ -392,11 +392,18 @@ def join_audio(
     segments: list[dict],
     output_path: str,
     crossfade_ms: int = 0,
+    placement: list[dict] | None = None,
 ) -> str:
     """Join in order, omitting decoded segments shorter than 50 ms.
 
     Inputs are not mutated. Missing or undecodable files still fail; if every
     segment is omitted, no final audio is exported. Omissions are audited.
+
+    ``placement`` (optional out-parameter) receives one ``{"index", "start_ms",
+    "end_ms"}`` entry per **surviving** segment, in output order. Downstream
+    subtitle export uses it to move cue times from the source timeline onto this
+    joined timeline (see ``modules/subtitles/timeline.py``); it is a plain list so
+    the returned contract of this function stays a path string.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -421,9 +428,11 @@ def join_audio(
 
             if combined is None:
                 combined = seg_audio
+                start_ms = 0
             else:
                 # 虚拟淡化：本段标记 overlap_ms 时，上一段的淡化尾巴保留，
                 # 下一段开头重叠其上，再接下一段剩余部分——总长扣除 overlap。
+                before_ms = len(combined)
                 overlap = int(seg.get("overlap_ms") or 0)
                 if overlap > 0 and len(combined) > overlap and len(seg_audio) > 0:
                     overlap = min(overlap, len(seg_audio))
@@ -432,12 +441,19 @@ def join_audio(
                     head_over = seg_audio[:overlap].set_channels(2)
                     rest = seg_audio[overlap:].set_channels(2)
                     combined = (body + tail.overlay(head_over, position=0) + rest)
+                    start_ms = before_ms - overlap
                 elif crossfade_ms > 0:
                     crossfade = min(crossfade_ms, len(combined) // 2, len(seg_audio) // 2)
                     combined = combined.append(seg_audio, crossfade=crossfade)
+                    start_ms = before_ms - crossfade
                 else:
                     combined = combined + seg_audio
+                    start_ms = before_ms
 
+            if placement is not None:
+                placement.append({"index": int(seg["index"]),
+                                  "start_ms": int(start_ms),
+                                  "end_ms": int(len(combined))})
             valid_count += 1
         except Exception:
             raise

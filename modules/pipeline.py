@@ -762,8 +762,13 @@ def run_pipeline(
         ps("Joining processed segments into final audio...")
         print_progress("concat", "正在合并最终文件", 0, 1)
         final_output = os.path.join(output_dir, "output.wav")
+        # ``placement`` records, per surviving segment, where it landed in the
+        # joined file. Dual/sync modes change the audio timeline, so the subtitle
+        # export below needs this to stay in sync (modules/subtitles/timeline.py).
+        segment_placement: list[dict] = []
         _required_stage("AUDIO_JOIN_FAILED", join_audio,
-                        all_segments, final_output, crossfade_ms=crossfade_ms)
+                        all_segments, final_output, crossfade_ms=crossfade_ms,
+                        placement=segment_placement)
         print_progress("concat", "正在合并最终文件", 1, 1)
 
         # Record last step time
@@ -816,6 +821,26 @@ def run_pipeline(
         except Exception as error:
             from .error import ExportError, descriptor
             raise ExportError(descriptor("SUBTITLE_FINAL_EMPTY"), detail=str(error), cause=error) from error
+        # The joined audio may be longer than the source (dual/sync append TTS) or
+        # shorter (crossfade), so ``final.vtt`` above keeps the source timeline for
+        # backward compatibility. Also emit the same cues on the *output* timeline;
+        # clients can then use it directly instead of guessing with audio
+        # cross-correlation (which drifts badly on quiet material).
+        if segment_placement:
+            from .subtitles.timeline import align_blocks_to_output
+            aligned_blocks, dropped = align_blocks_to_output(
+                blocks, all_segments, segment_placement)
+            if dropped:
+                print(f"       [subtitle.align] {len(dropped)} 条字幕所属分段未进入成品，已省略")
+            if aligned_blocks:
+                try:
+                    result["final_aligned_vtt"] = write_final_vtt(
+                        build_final_subtitles(aligned_blocks), output_dir,
+                        filename="final.aligned.vtt")
+                    print(f"       [subtitle.align] 输出时间轴字幕: "
+                          f"{len(aligned_blocks)} cues → {result['final_aligned_vtt']}")
+                except Exception as error:
+                    print(f"       [warn] 输出时间轴字幕导出失败，已跳过: {error}")
         from .high_quality_export import write_export_recipe
         result["high_quality_recipe"] = _required_stage(
             "OUTPUT_WRITE_DENIED", write_export_recipe, audio_path, all_segments,

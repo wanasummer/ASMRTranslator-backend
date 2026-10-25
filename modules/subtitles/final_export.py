@@ -59,12 +59,18 @@ def _timestamp(milliseconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
-def write_final_vtt(cues: Iterable[FinalSubtitleCue], output_dir: str) -> str:
-    """Write UTF-8/LF WebVTT to ``llm_subtitles/final.vtt``."""
+def write_final_vtt(cues: Iterable[FinalSubtitleCue], output_dir: str,
+                    filename: str = "final.vtt") -> str:
+    """Write UTF-8/LF WebVTT to ``llm_subtitles/<filename>``.
+
+    ``filename`` defaults to the established ``final.vtt`` (source timeline) so
+    existing consumers keep working; ``final.aligned.vtt`` carries the same cues
+    moved onto the joined-output timeline (see ``modules/subtitles/timeline.py``).
+    """
     cue_list = list(cues)
     if not cue_list:
         raise FinalSubtitleError("最终字幕没有可导出的有效 cue")
-    path = Path(output_dir) / "llm_subtitles" / "final.vtt"
+    path = Path(output_dir) / "llm_subtitles" / filename
     lines = ["WEBVTT", ""]
     for cue in cue_list:
         text = f"{cue.speaker}：{cue.text}" if cue.speaker else cue.text
