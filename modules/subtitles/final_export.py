@@ -2,9 +2,12 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Protocol
+from typing import TYPE_CHECKING, Iterable, Optional, Protocol
 
 from ..io import write_text
+
+if TYPE_CHECKING:
+    from ..audio_joiner import SegmentPlacement
 
 
 class FinalSubtitleSource(Protocol):
@@ -51,6 +54,27 @@ def build_final_subtitles(blocks: Iterable[FinalSubtitleSource], *,
     return cues
 
 
+class IndexedSubtitleSource(FinalSubtitleSource, Protocol):
+    index: int
+
+
+def build_aligned_subtitles(blocks: Iterable[IndexedSubtitleSource],
+                            placements: Iterable["SegmentPlacement"]) -> list[FinalSubtitleCue]:
+    """Use returned audio spans, preserving real overlaps without mutating blocks.
+
+    Missing segments have no audio; their omissions and placement spans are
+    already recorded in output.join_audit.json by the joiner.
+    """
+    placed = {item.block_id: item for item in placements}
+    mapped = []
+    for block in blocks:
+        item = placed.get(str(block.index))
+        if item is not None and not getattr(block, "skip_tts", False):
+            mapped.append(FinalSubtitleCue(0, item.subtitle_start_ms, item.subtitle_end_ms,
+                                           block.text, block.speaker))
+    return build_final_subtitles(mapped)
+
+
 def _timestamp(milliseconds: int) -> str:
     milliseconds = max(0, int(milliseconds))
     hours, remainder = divmod(milliseconds, 3_600_000)
@@ -74,5 +98,9 @@ def write_final_vtt(cues: Iterable[FinalSubtitleCue], output_dir: str) -> str:
             text,
             "",
         ])
-    write_text(str(path), "\n".join(lines), encoding="utf-8")
+    try:
+        write_text(str(path), "\n".join(lines), encoding="utf-8")
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
     return str(path.resolve())

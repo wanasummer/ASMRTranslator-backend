@@ -4,8 +4,9 @@ import os
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, overload
 
 from .io import write_json
 
@@ -376,7 +377,38 @@ def build_sync_segments(
     return segments
 
 
-def _write_join_audit(output_path: str, valid_count: int, skipped: list[dict]) -> str:
+@dataclass(frozen=True)
+class SegmentPlacement:
+    block_id: str
+    start_ms: int
+    end_ms: int
+    subtitle_start_ms: int
+    subtitle_end_ms: int
+
+
+@dataclass(frozen=True)
+class JoinedAudio:
+    path: str
+    placements: tuple[SegmentPlacement, ...]
+
+
+def _segment_placement(seg: dict, start_ms: int, duration_ms: int) -> SegmentPlacement:
+    """Use source speech in retained audio; direct TTS occupies the full file."""
+    audio_file = seg.get("vc_file") or seg.get("tts_file")
+    if not seg.get("skip_tts") and audio_file == seg.get("tts_file"):
+        start, end = 0, duration_ms
+    else:
+        start = int(seg["original_start_ms"]) - int(seg["start_ms"])
+        end = int(seg["original_end_ms"]) - int(seg["start_ms"])
+    start = min(duration_ms, max(0, start))
+    end = min(duration_ms, max(start, end))
+    return SegmentPlacement(str(seg.get("segment_id", seg["index"])),
+                            start_ms, start_ms + duration_ms,
+                            start_ms + start, start_ms + end)
+
+
+def _write_join_audit(output_path: str, valid_count: int, skipped: list[dict],
+                      placements: list[SegmentPlacement]) -> str:
     """Persist omissions beside the joined audio; source slices remain intact."""
     return write_json(str(Path(output_path).with_suffix(".join_audit.json")), {
         "schemaVersion": 1,
@@ -385,24 +417,39 @@ def _write_join_audit(output_path: str, valid_count: int, skipped: list[dict]) -
         "joined_count": valid_count,
         "skipped_count": len(skipped),
         "skipped_segments": skipped,
+        "placements": [asdict(item) for item in placements],
     })
+
+
+@overload
+def join_audio(segments: list[dict], output_path: str, crossfade_ms: int = 0,
+               *, return_timeline: Literal[False] = False) -> str: ...
+
+
+@overload
+def join_audio(segments: list[dict], output_path: str, crossfade_ms: int = 0,
+               *, return_timeline: Literal[True]) -> JoinedAudio: ...
 
 
 def join_audio(
     segments: list[dict],
     output_path: str,
     crossfade_ms: int = 0,
-) -> str:
+    *, return_timeline: bool = False,
+) -> str | JoinedAudio:
     """Join in order, omitting decoded segments shorter than 50 ms.
 
     Inputs are not mutated. Missing or undecodable files still fail; if every
     segment is omitted, no final audio is exported. Omissions are audited.
+    Opt into an immutable placement result for output-timeline subtitles; the
+    default return value remains the output path.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     combined = None
     valid_count = 0
     skipped: list[dict] = []
+    placements: list[SegmentPlacement] = []
 
     for seg in segments:
         audio_file = seg.get("vc_file") or seg.get("tts_file")
@@ -421,9 +468,11 @@ def join_audio(
 
             if combined is None:
                 combined = seg_audio
+                start_ms = 0
             else:
                 # 虚拟淡化：本段标记 overlap_ms 时，上一段的淡化尾巴保留，
                 # 下一段开头重叠其上，再接下一段剩余部分——总长扣除 overlap。
+                before_ms = len(combined)
                 overlap = int(seg.get("overlap_ms") or 0)
                 if overlap > 0 and len(combined) > overlap and len(seg_audio) > 0:
                     overlap = min(overlap, len(seg_audio))
@@ -432,17 +481,22 @@ def join_audio(
                     head_over = seg_audio[:overlap].set_channels(2)
                     rest = seg_audio[overlap:].set_channels(2)
                     combined = (body + tail.overlay(head_over, position=0) + rest)
+                    start_ms = before_ms - overlap
                 elif crossfade_ms > 0:
                     crossfade = min(crossfade_ms, len(combined) // 2, len(seg_audio) // 2)
                     combined = combined.append(seg_audio, crossfade=crossfade)
+                    start_ms = before_ms - crossfade
                 else:
                     combined = combined + seg_audio
+                    start_ms = before_ms
 
+            if return_timeline:
+                placements.append(_segment_placement(seg, start_ms, len(combined) - start_ms))
             valid_count += 1
         except Exception:
             raise
 
-    audit_path = _write_join_audit(output_path, valid_count, skipped)
+    audit_path = _write_join_audit(output_path, valid_count, skipped, placements)
     print(f"       [audio.concat] Joined {valid_count}, skipped {len(skipped)} "
           f"segments; audit: {audit_path}")
     if combined is None:
@@ -458,7 +512,7 @@ def join_audio(
     mp3_path = output_path.replace(".wav", ".mp3")
     combined.export(mp3_path, format="mp3", bitrate="192k")
 
-    return output_path
+    return JoinedAudio(output_path, tuple(placements)) if return_timeline else output_path
 
 
 def concat_audio_files(

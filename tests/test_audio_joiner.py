@@ -368,5 +368,71 @@ class JoinOverlapTest(unittest.TestCase):
             self.assertLess(abs(len(joined) - 1800), 30)
 
 
+class JoinTimelineTest(unittest.TestCase):
+    """Use real WAV decoding/joining; mock only external output encoding."""
+
+    def join(self, directory, durations, *, crossfade=0, overlap=0, source=False, speech_delay=0):
+        segments = []
+        for index, duration in enumerate(durations):
+            path = os.path.join(directory, f"timeline_{index}.wav")
+            _write_wav(path, duration)
+            segments.append({"index": index, "segment_id": str(index + 10),
+                             "start_ms": index * 1000,
+                             "original_start_ms": index * 1000 + speech_delay,
+                             "original_end_ms": (index + 1) * 1000 + speech_delay,
+                             "vc_file": path, "tts_file": None if source else path,
+                             "overlap_ms": overlap if index else 0})
+        original = [dict(segment) for segment in segments]
+        exported = []
+        def capture(audio, path, **kwargs):
+            exported.append(audio)
+        with patch.object(AudioSegment, "export", autospec=True, side_effect=capture):
+            result = join_audio(
+                segments, os.path.join(directory, "output.wav"), crossfade,
+                return_timeline=True)
+        self.assertEqual(segments, original)
+        self.assertIsInstance(result.placements, tuple)
+        self.assertEqual(result.placements[-1].end_ms, len(exported[0]))
+        return result
+
+    def test_crossfade_placements_match_real_audio_length(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.join(d, [1000, 1000, 1000], crossfade=100)
+            self.assertEqual([(p.start_ms, p.end_ms) for p in result.placements],
+                             [(0, 1000), (900, 1900), (1800, 2800)])
+            self.assertEqual([p.block_id for p in result.placements], ["10", "11", "12"])
+
+    def test_virtual_overlap_and_short_segments_use_surviving_audio_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.join(d, [1000, 20, 800], overlap=200)
+            self.assertEqual([(p.block_id, p.start_ms, p.end_ms) for p in result.placements],
+                             [("10", 0, 1000), ("12", 800, 1600)])
+            with open(os.path.join(d, "output.join_audit.json"), encoding="utf-8") as file:
+                audit = json.load(file)
+            self.assertEqual([p["block_id"] for p in audit["placements"]], ["10", "12"])
+            self.assertEqual([p["index"] for p in audit["skipped_segments"]], [1])
+
+    def test_crossfade_is_clamped_by_decoded_segment_lengths(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.join(d, [1000, 100], crossfade=500)
+            self.assertEqual((result.placements[1].start_ms, result.placements[1].end_ms),
+                             (950, 1050))
+
+    def test_extended_source_segment_moves_next_cue_by_actual_extension(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.join(d, [3000, 1000], source=True)
+            self.assertEqual([(p.subtitle_start_ms, p.subtitle_end_ms) for p in result.placements],
+                             [(0, 1000), (3000, 4000)])
+
+    def test_replace_discards_source_leading_silence_and_source_spans_are_clipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.join(d, [800], speech_delay=5000)
+            self.assertEqual((result.placements[0].subtitle_start_ms,
+                              result.placements[0].subtitle_end_ms), (0, 800))
+            result = self.join(d, [800], source=True, speech_delay=500)
+            self.assertEqual((result.placements[0].subtitle_start_ms,
+                              result.placements[0].subtitle_end_ms), (500, 800))
+
+
 if __name__ == "__main__":
     unittest.main()

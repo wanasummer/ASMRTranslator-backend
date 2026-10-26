@@ -782,8 +782,9 @@ def run_pipeline(
         ps("Joining processed segments into final audio...")
         print_progress("concat", "正在合并最终文件", 0, 1)
         final_output = os.path.join(output_dir, "output.wav")
-        _required_stage("AUDIO_JOIN_FAILED", join_audio,
-                        all_segments, final_output, crossfade_ms=crossfade_ms)
+        joined = _required_stage("AUDIO_JOIN_FAILED", join_audio,
+                                 all_segments, final_output, crossfade_ms=crossfade_ms,
+                                 return_timeline=True)
         print_progress("concat", "正在合并最终文件", 1, 1)
 
         # Record last step time
@@ -830,9 +831,11 @@ def run_pipeline(
             "detect_summary": detect_summary,
             "vad_realignment_summary": detect_summary,
         }
-        from .subtitles.final_export import build_final_subtitles, write_final_vtt
+        from .subtitles.final_export import build_aligned_subtitles, write_final_vtt
         try:
-            result["final_vtt"] = write_final_vtt(build_final_subtitles(blocks), output_dir)
+            cues = build_aligned_subtitles(blocks, joined.placements)
+            result["final_vtt"] = write_final_vtt(cues, output_dir)
+            print(f"       [subtitle.export] {len(cues)} cues → {result['final_vtt']}")
         except Exception as error:
             from .error import ExportError, descriptor
             raise ExportError(descriptor("SUBTITLE_FINAL_EMPTY"), detail=str(error), cause=error) from error

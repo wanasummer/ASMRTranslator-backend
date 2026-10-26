@@ -200,7 +200,8 @@ class AudioMetadataTests(unittest.TestCase):
             def join(segments, output, **kwargs):
                 write_wave(output)
                 Path(output).with_suffix(".mp3").write_bytes(b"audio")
-                return output
+                from modules.audio_joiner import JoinedAudio, SegmentPlacement
+                return JoinedAudio(output, (SegmentPlacement("0", 0, 1000, 0, 1000),))
 
             def record(*args):
                 self.assertEqual(id3.ID3(Path(output_dir) / "output.mp3")["TPE1"].text,
