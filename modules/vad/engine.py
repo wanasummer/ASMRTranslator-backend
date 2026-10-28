@@ -134,7 +134,7 @@ def create_vad(cfg: dict) -> VADEngine:
     Returns a ``NoOpVAD`` (``available=False``) when VAD is disabled in the
     config or the native component (fsmn_vad.dll / fsmn-vad.gguf) is missing
     or fails to load. Plugin configuration errors are raised at construction;
-    remote inference errors are raised by the selected adapter.
+    local plugin inference errors are raised by the selected adapter.
     """
     if not cfg.get("enabled", True):
         return NoOpVAD("vad.enabled=false")
