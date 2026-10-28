@@ -7,7 +7,7 @@ import unittest
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from modules.detect.aligners import JointVadSentenceAligner
 from modules.detect.contracts import (
@@ -279,6 +279,30 @@ class JointVadAlignerTests(unittest.TestCase):
 
 
 class DetectStageTests(unittest.TestCase):
+    def test_document_blocks_get_lineage_without_mutating_speaker_timestamps(self):
+        sources = (
+            VTTBlock(0, 0, 2000, "今日は休みです。", speaker="S1"),
+            VTTBlock(1, 1500, 3000, "明日は仕事です。", speaker="S2"),
+        )
+        atoms = Mock()
+        atoms.detect.side_effect = lambda parent, silence: (
+            region(parent.id, parent.speech_start_ms, parent.speech_end_ms),
+        )
+        config = DetectConfig()
+        stage = DefaultDetectStage(
+            config, MecabJapaneseSentenceDetector(),
+            JointVadSentenceAligner(config, AlignmentDependencies(
+                "unused.wav", atoms, JapaneseMoraDurationEstimator(),
+                JointDynamicProgrammingPartitioner(config),
+            )),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = stage.run(DetectStageInput(sources), directory)
+        self.assertEqual([(b.start_ms, b.end_ms, b.speaker) for b in result.blocks],
+                         [(0, 2000, "S1"), (1500, 3000, "S2")])
+        self.assertTrue(all(b.asr_slice is None for b in sources))
+        self.assertEqual(len({b.aligned_sentence.source_block_id for b in result.blocks}), 2)
+
     def test_stage_returns_japanese_sentences_for_cleaner_and_writes_audit(self):
         parent = parent_slice(0, 3300)
         source = VTTBlock(
@@ -336,9 +360,49 @@ class DetectStageTests(unittest.TestCase):
         self.assertTrue(detect_eligible(**args))
         self.assertFalse(detect_eligible(**{**args, "enabled": False}))
         self.assertFalse(detect_eligible(**{**args, "subtitle_path": "input.vtt"}))
+        self.assertFalse(detect_eligible(**{**args, "language": "zh"}))
+        for backend in ("fish-asr", "common-asr", "qwen-audio-3.1-asr-flash",
+                        "fun-asr", "mimo-asr", "moss-transcribe-diarize", "chickenrice"):
+            with self.subTest(backend=backend):
+                self.assertTrue(detect_eligible(**{**args, "backend": backend, "project_vad": False}))
 
 
 class PipelineHandoffTests(unittest.TestCase):
+    def test_native_document_asr_reaches_detection_without_project_vad(self):
+        from modules.asr.base import DocumentASRAdapter
+        from modules.asr.moss_adapter import MossDocumentResult
+        from modules.pipeline import run_pipeline
+        from modules.error import PipelineError
+
+        source = VTTBlock(0, 100, 2100, "今日は休みです。", speaker="S1")
+        detected = replace(source, text="検出した日本語。")
+        adapter = Mock(spec=DocumentASRAdapter)
+        adapter.uses_project_vad.return_value = False
+        adapter.transcribe_document = AsyncMock(return_value=MossDocumentResult("ja", [source]))
+        stage = Mock()
+        stage.run.return_value = DetectStageResult((detected,), {"exactSlices": 1})
+
+        class StopAfterHandoff(Exception):
+            pass
+
+        cleaner = Mock(name="cleaner")
+        cleaner.clean.side_effect = StopAfterHandoff()
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            analysis = stack.enter_context(patch("modules.vad.stage.run_analysis_stage"))
+            legacy_vad = stack.enter_context(patch("modules.pipeline._run_vad_stage"))
+            stack.enter_context(patch("modules.asr.create_asr", return_value=adapter))
+            stack.enter_context(patch("modules.detect.create_detect_stage", return_value=stage))
+            stack.enter_context(patch("modules.pipeline._create_japanese_cleaner_with_fallback", return_value=cleaner))
+            with self.assertRaises(PipelineError) as failure:
+                run_pipeline("unused.wav", "", directory, asr_backend="moss-transcribe-diarize",
+                             asr_kwargs={"language": "ja"}, detect_enabled=True)
+            self.assertIsInstance(failure.exception.cause, StopAfterHandoff)
+        analysis.assert_not_called()
+        legacy_vad.assert_not_called()
+        adapter.transcribe_document.assert_awaited_once_with("unused.wav", [])
+        self.assertEqual(stage.run.call_args.args[0].asr_blocks, (source,))
+        self.assertEqual(cleaner.clean.call_args.args[0], [detected])
+
     def test_detect_runs_before_cleaner_and_translation_keeps_its_timeline(self):
         from modules.pipeline import run_pipeline
         from modules.japanese_cleaning.mecab_regex import RegexJapaneseCleaner
@@ -427,6 +491,7 @@ class PipelineHandoffTests(unittest.TestCase):
                     "test.wav",
                     "",
                     directory,
+                    asr_backend="qwen-audio-3.1-asr-flash",
                     asr_kwargs={"api_key": "test"},
                     llm_kwargs={"api_key": "test", "model": "test"},
                     detect_enabled=True,

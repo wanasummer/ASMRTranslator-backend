@@ -504,8 +504,11 @@ def run_pipeline(
                     project_vad=needs_project_vad,
                 ):
                     detect_stage = create_detect_stage(detect_config, audio_path)
-                    final_slices, _ = run_analysis_stage(
-                        audio_path, vad_cfg, output_dir)
+                    if needs_project_vad:
+                        final_slices, _ = run_analysis_stage(
+                            audio_path, vad_cfg, output_dir)
+                    else:
+                        final_slices = []
                 else:
                     final_slices = _run_vad_stage(audio_path, vad_cfg, output_dir) if needs_project_vad else []
                 if needs_project_vad and not final_slices:
@@ -571,6 +574,8 @@ def run_pipeline(
                 print(f"       [japanese-clean] 清洗字幕: {artifacts['vtt']}")
                 print(f"       [japanese-clean] 清洗报告: {artifacts['report']}")
             elif asr_output_language == "zh":
+                if detect_enabled:
+                    print("       [detect] ASR 已直出中文，没有日语原文，跳过日语句界检测")
                 print("       [asr] 海南鸡已直出中文，跳过日语清洗、总结和翻译")
             else:
                 raise ValueError(f"ASR 返回了不支持的语言：{asr_output_language}")

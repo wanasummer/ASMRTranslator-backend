@@ -25,8 +25,6 @@ def detect_eligible(
     return bool(
         enabled
         and not subtitle_path
-        and project_vad
-        and backend in ("fish-asr", "common-asr")
         and language == "ja"
     )
 
@@ -69,9 +67,15 @@ class DefaultDetectStage:
         }
         records, output, seen = [], [], set()
 
-        for block in asr_blocks:
-            parent = block.asr_slice
-            if parent is None or parent.id in seen:
+        for position, block in enumerate(asr_blocks):
+            # Document ASR owns its timestamps and need not provide project VAD
+            # lineage. Derive a stable parent without mutating the source block.
+            parent = block.asr_slice or AsrSlice(
+                f"document-asr:{position}:{block.index}",
+                block.start_ms, block.end_ms, block.start_ms, block.end_ms,
+                (f"document-asr:{position}:{block.index}",),
+            )
+            if parent.id in seen:
                 raise DetectError(
                     "DETECT_LINEAGE_INVALID",
                     "ASR block lost or duplicated its slice identity",
@@ -132,8 +136,11 @@ class DefaultDetectStage:
                 ))
 
         previous_end = -1
+        # Document backends may author overlapping speaker turns. Preserve those
+        # ranges; project VAD slices retain their strict non-overlap contract.
+        document_timeline = any(block.asr_slice is None for block in asr_blocks)
         for block in output:
-            if block.start_ms < previous_end or block.end_ms <= block.start_ms:
+            if (not document_timeline and block.start_ms < previous_end) or block.end_ms <= block.start_ms:
                 raise DetectError(
                     "DETECT_ALIGNMENT_INVALID",
                     "Invalid global sentence timeline",

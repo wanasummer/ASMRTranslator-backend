@@ -211,6 +211,11 @@ class DetectConfig:
 
 @dataclass(frozen=True)
 class DetectStageInput:
+    """ASR blocks, copied on output; absent slice lineage uses authored ranges.
+
+    Document ASR speaker turns may overlap and retain their source ordering.
+    """
+
     asr_blocks: tuple[AsrBlock, ...]
 
 

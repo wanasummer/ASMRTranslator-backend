@@ -15,6 +15,7 @@ from modules.error import ASRError
 from modules import preflight
 from modules.pipeline import run_pipeline
 from modules.llm_enhancer import _build_sentence_blocks
+from modules.detect.contracts import DetectStageResult
 
 
 def payload():
@@ -77,6 +78,8 @@ class MossPipelineTests(unittest.TestCase):
                     patch("modules.pipeline._run_vad_stage") as vad, \
                     patch("modules.llm_enhancer.enhance_asr_blocks", side_effect=translate), \
                     patch("modules.detect.create_detect_stage") as detect, redirect_stdout(StringIO()):
+                detect.return_value.run.side_effect = lambda value, output_dir: DetectStageResult(
+                    value.asr_blocks, {"exactSlices": len(value.asr_blocks)})
                 for _ in range(2):
                     result = run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
                         asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
@@ -84,7 +87,8 @@ class MossPipelineTests(unittest.TestCase):
                     self.assertEqual([block.speaker for block in result["blocks"]], ["S01", "S02"])
                     self.assertIn("S01：こんにちは。", Path(result["final_vtt"]).read_text(encoding="utf-8"))
             vad.assert_not_called()
-            detect.assert_not_called()
+            detect.assert_called_once()
+            detect.return_value.run.assert_called_once()
             client.request.assert_called_once()
             self.assertEqual(preserved, [True, True])
             raw = json.loads((output / "asr_subtitles/raw_response.json").read_text(encoding="utf-8"))
