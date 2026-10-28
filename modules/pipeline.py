@@ -370,6 +370,11 @@ def run_pipeline(
                                  vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
                                  sentence_detector=sentence_detector)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
+    detect_enabled = detect_eligible(
+        detect_enabled, vtt_path, asr_backend,
+        (asr_kwargs or {}).get("output_language", (asr_kwargs or {}).get("language", "ja")),
+        sentence_aligner=sentence_aligner,
+    )
     detect_stage = None
     detect_summary = None
     output_dir = os.path.abspath(output_dir)
@@ -494,15 +499,7 @@ def run_pipeline(
                 adapter = create_asr(asr_backend, **asr_kwargs)
                 document_adapter = adapter if isinstance(adapter, DocumentASRAdapter) else None
                 needs_project_vad = document_adapter is None or document_adapter.uses_project_vad()
-                if detect_eligible(
-                    detect_enabled,
-                    vtt_path,
-                    asr_backend,
-                    asr_kwargs.get(
-                        "output_language", asr_kwargs.get("language", "ja")
-                    ),
-                    project_vad=needs_project_vad,
-                ):
+                if detect_enabled:
                     detect_stage = create_detect_stage(detect_config, audio_path)
                     if needs_project_vad:
                         final_slices, _ = run_analysis_stage(

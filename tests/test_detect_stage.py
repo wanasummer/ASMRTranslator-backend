@@ -361,8 +361,10 @@ class DetectStageTests(unittest.TestCase):
         self.assertFalse(detect_eligible(**{**args, "enabled": False}))
         self.assertFalse(detect_eligible(**{**args, "subtitle_path": "input.vtt"}))
         self.assertFalse(detect_eligible(**{**args, "language": "zh"}))
+        self.assertFalse(detect_eligible(**{**args, "backend": "moss-transcribe-diarize"}))
+        self.assertFalse(detect_eligible(**{**args, "sentence_aligner": "qwen-force-align"}))
         for backend in ("fish-asr", "common-asr", "qwen-audio-3.1-asr-flash",
-                        "fun-asr", "mimo-asr", "moss-transcribe-diarize", "chickenrice"):
+                        "fun-asr", "mimo-asr", "chickenrice"):
             with self.subTest(backend=backend):
                 self.assertTrue(detect_eligible(**{**args, "backend": backend, "project_vad": False}))
 
@@ -370,7 +372,7 @@ class DetectStageTests(unittest.TestCase):
 class PipelineHandoffTests(unittest.TestCase):
     def test_native_document_asr_reaches_detection_without_project_vad(self):
         from modules.asr.base import DocumentASRAdapter
-        from modules.asr.moss_adapter import MossDocumentResult
+        from modules.asr.chickenrice_adapter import ChickenRiceSubtitleResult
         from modules.pipeline import run_pipeline
         from modules.error import PipelineError
 
@@ -378,7 +380,8 @@ class PipelineHandoffTests(unittest.TestCase):
         detected = replace(source, text="検出した日本語。")
         adapter = Mock(spec=DocumentASRAdapter)
         adapter.uses_project_vad.return_value = False
-        adapter.transcribe_document = AsyncMock(return_value=MossDocumentResult("ja", [source]))
+        adapter.transcribe_document = AsyncMock(return_value=ChickenRiceSubtitleResult(
+            "ja", [source], "chickenrice", "chickenrice_vad"))
         stage = Mock()
         stage.run.return_value = DetectStageResult((detected,), {"exactSlices": 1})
 
@@ -394,7 +397,7 @@ class PipelineHandoffTests(unittest.TestCase):
             stack.enter_context(patch("modules.detect.create_detect_stage", return_value=stage))
             stack.enter_context(patch("modules.pipeline._create_japanese_cleaner_with_fallback", return_value=cleaner))
             with self.assertRaises(PipelineError) as failure:
-                run_pipeline("unused.wav", "", directory, asr_backend="moss-transcribe-diarize",
+                run_pipeline("unused.wav", "", directory, asr_backend="chickenrice",
                              asr_kwargs={"language": "ja"}, detect_enabled=True)
             self.assertIsInstance(failure.exception.cause, StopAfterHandoff)
         analysis.assert_not_called()

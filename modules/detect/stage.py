@@ -21,10 +21,13 @@ def detect_eligible(
     language,
     llm_config=None,
     project_vad=True,
+    sentence_aligner="joint-vad",
 ):
     return bool(
         enabled
         and not subtitle_path
+        and backend != "moss-transcribe-diarize"
+        and sentence_aligner != "qwen-force-align"
         and language == "ja"
     )
 
