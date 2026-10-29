@@ -27,7 +27,6 @@ def detect_eligible(
         enabled
         and not subtitle_path
         and backend != "moss-transcribe-diarize"
-        and sentence_aligner != "qwen-force-align"
         and language == "ja"
     )
 

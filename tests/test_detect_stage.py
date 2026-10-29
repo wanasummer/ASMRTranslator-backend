@@ -362,7 +362,7 @@ class DetectStageTests(unittest.TestCase):
         self.assertFalse(detect_eligible(**{**args, "subtitle_path": "input.vtt"}))
         self.assertFalse(detect_eligible(**{**args, "language": "zh"}))
         self.assertFalse(detect_eligible(**{**args, "backend": "moss-transcribe-diarize"}))
-        self.assertFalse(detect_eligible(**{**args, "sentence_aligner": "qwen-force-align"}))
+        self.assertTrue(detect_eligible(**{**args, "sentence_aligner": "qwen-force-align"}))
         for backend in ("fish-asr", "common-asr", "qwen-audio-3.1-asr-flash",
                         "fun-asr", "mimo-asr", "chickenrice"):
             with self.subTest(backend=backend):
@@ -498,9 +498,11 @@ class PipelineHandoffTests(unittest.TestCase):
                     asr_kwargs={"api_key": "test"},
                     llm_kwargs={"api_key": "test", "model": "test"},
                     detect_enabled=True,
+                    sentence_aligner="qwen-force-align",
                 )
 
         detect_input = fake_stage.run.call_args.args[0].asr_blocks
+        self.assertEqual(fake_stage.run.call_count, 1)
         self.assertEqual([block.text for block in detect_input], ["これは日本語です。"])
         self.assertEqual([block.text for block in cleaner_inputs], ["検出した日本語。"])
         self.assertEqual([block.text for block in translator_inputs], ["検出した日本語。"])

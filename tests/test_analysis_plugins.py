@@ -109,6 +109,14 @@ class AnalysisAdapters(unittest.TestCase):
         self.assertTrue(all(row.asr_slice.region_ids == parent.region_ids for row in result.blocks))
         self.assertEqual(audit["summary"]["alignedSlices"], 1)
         self.assertEqual(calls[0], {"start_ms": 1000, "end_ms": 5000})
+        from modules.llm_enhancer import _build_sentence_blocks
+        translated = _build_sentence_blocks(result.blocks, {
+            0: ["今天休息。", "不需要上班。"], 1: ["明天要工作。"],
+        }, preserve_source_timeline=True)
+        self.assertEqual([(row.start_ms, row.end_ms, row.text) for row in translated], [
+            (1100, 2400, "今天休息。不需要上班。"), (2700, 4600, "明天要工作。"),
+        ])
+        self.assertEqual([row.source_text for row in translated], [row.text for row in result.blocks])
 
     def test_qwen_failure_retains_parent_and_reports_fallback(self):
         parent, detection = self.detection()

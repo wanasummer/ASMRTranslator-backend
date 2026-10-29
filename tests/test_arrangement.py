@@ -118,7 +118,7 @@ class ArrangementTests(unittest.TestCase):
         with self.assertRaises(ArrangementError):
             save_state(self.work, self.state)
 
-    def test_load_rebases_stale_draft_with_same_segment_ids_and_preserves_backup(self):
+    def test_changed_source_resets_same_ids_and_preserves_old_draft_as_backup(self):
         self.state["segments"][0].update(text="用户修改的字幕", volume=.7,
                                           interval={"start": 100, "end": 900})
         save_state(self.work, self.state)
@@ -129,9 +129,9 @@ class ArrangementTests(unittest.TestCase):
 
         result = run_editor_request({"workDir": str(self.work), "action": "load"})["state"]
         self.assertNotEqual(result["sourceVersion"], old_version)
-        self.assertEqual(result["segments"][0]["text"], "用户修改的字幕")
-        self.assertEqual(result["segments"][0]["volume"], .7)
-        self.assertEqual(result["segments"][0]["interval"], {"start": 100, "end": 900})
+        self.assertEqual(result["segments"][0]["text"], "重新生成的字幕")
+        self.assertEqual(result["segments"][0]["volume"], 1)
+        self.assertIsNone(result["segments"][0]["interval"])
         draft_path = self.work / "arrangement/draft.json"
         self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["sourceVersion"], old_version)
 
@@ -152,6 +152,19 @@ class ArrangementTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["index"], 99)
         self.assertEqual(result["segments"][0]["text"], self.rows[0]["text"])
         self.assertEqual(json.loads((self.work / "arrangement/draft.json").read_text(encoding="utf-8"))["segments"][0]["text"], "保留在旧草稿中的字幕")
+
+    def test_changed_timing_with_same_text_and_ids_does_not_inherit_intervals(self):
+        self.state["segments"][0]["interval"] = {"start": 100, "end": 900}
+        save_state(self.work, self.state)
+        original_draft = (self.work / "arrangement/draft.json").read_bytes()
+        self.rows[0].update(start_ms=500, end_ms=1500)
+        (self.work / "debug/_parsed_vtt.json").write_text(
+            json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
+
+        result = load_state(self.work)
+        self.assertEqual(result, initial_state(self.work))
+        self.assertIsNone(result["segments"][0]["interval"])
+        self.assertEqual((self.work / "arrangement/draft.json").read_bytes(), original_draft)
 
     def test_single_optimization_always_uses_current_japanese_and_does_not_mutate(self):
         optimizer = MagicMock()

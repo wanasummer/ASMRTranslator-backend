@@ -109,19 +109,9 @@ def load_state(work: Path) -> ArrangementState:
         raise ArrangementError("编排草稿格式无效")
     baseline = initial_state(work)
     if saved.get("sourceVersion") != baseline["sourceVersion"]:
-        edits = saved.get("segments")
-        current = baseline["segments"]
-        if isinstance(edits, list) and len(edits) == len(current) and all(
-            isinstance(edit, dict) and edit.get("index") == row["index"]
-            for edit, row in zip(edits, current)
-        ):
-            migrated = {**saved, "sourceVersion": baseline["sourceVersion"]}
-            try:
-                return validate_state(work, migrated)
-            except ArrangementError:
-                pass
-        # A changed fragment list cannot safely inherit old edits. The old
-        # draft remains on disk until a valid new draft is saved.
+        # Positional IDs can be reused after resegmentation. Only the exact
+        # source fingerprint proves that text and timing edits still belong.
+        # Keep the old draft on disk; save_state backs it up on the next save.
         return baseline
     return validate_state(work, saved)
 
