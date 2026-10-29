@@ -62,27 +62,6 @@ uv run python main.py --help
 
 ## 配置与日志
 
-### 外部人声检测与强制对齐
-
-桌面设置中的“人声检测与时间对齐”支持两个独立插件服务：
-
-| 插件 | 默认地址 | 用途 |
-| --- | --- | --- |
-| ASMR VAD | `http://127.0.0.1:8006` | 使用 Whisper VAD ONNX 检测日语耳语的人声区间 |
-| Qwen Force Align | `http://127.0.0.1:8007` | 使用 Qwen3 ForcedAligner 为日语原文预测词时间戳并组合句子 |
-
-安装包由插件仓库提供，可在插件安装器中导入本地 ZIP。安装完成并启动服务后，在主程序扫描本地端口并测试连接；也可填写局域网服务地址。
-
-CLI 对应 `--vad-backend asmr-vad`、`--vad-endpoint`、`--vad-threshold`，以及 `--detect-stage --sentence-aligner qwen-force-align --qwen-align-endpoint`。默认仍使用内置 FSMN VAD，句子对齐默认关闭。桌面端的句子对齐用于 Fish ASR 或通用 ASR + 大模型翻译；后端对齐阶段在清洗、翻译与切音之前运行。异常时间戳、文本不匹配或服务故障会保留原片段，并写入 `detect_output/sentence_alignment.json`。已有字幕不调用这两个服务，海南鸡专属 VAD 开启时不调用项目 VAD。
-
-模型和运行依赖均保存在独立插件环境中，主程序不需要安装 PyTorch、ONNX Runtime 或 qwen-asr。
-
-### MOSS 转写与说话人区分
-
-“ASR 模型”可选择独立的 MOSS Transcribe Diarize 插件，默认地址 `http://127.0.0.1:8008`。可扫描插件安装器中的本机端口或配置远程地址，再测试服务连接。CLI 使用 `--asr-backend moss-transcribe-diarize --asr-kwargs '{"endpoint":"http://127.0.0.1:8008","language":"ja"}'`。
-
-MOSS 返回整段音频的原生时间戳和 `S01` 等录音内说话人标记，跳过项目 VAD 与句界对齐；日语文本进入既有清洗与翻译流程。原始响应保存到 `asr_subtitles/raw_response.json`，清洗字幕和缓存恢复保留说话人。接口单次音频最长 30 分钟，生成截断或不完整时间轴会明确失败。模型和 Transformers 5 运行环境由插件独立管理。
-
 用户配置沿用用户目录下的 `.asmrts`，已有环境变量优先。
 
 | 配置项 | 说明 |
