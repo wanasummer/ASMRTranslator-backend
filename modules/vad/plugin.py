@@ -1,9 +1,8 @@
-"""Local ASMR VAD adapter; model dependencies stay in the installed plugin."""
+"""ASMR VAD HTTP adapter; heavy model dependencies stay in the plugin."""
 import asyncio
 from typing import Any
 
-from ..analysis_plugins import validate_timeline
-from .local_runtime import LocalVADClient
+from ..analysis_plugins import AnalysisPluginClient, validate_timeline
 from ..error import VadError, descriptor
 from .engine import VADEngine
 from .models import SpeechRegion
@@ -12,7 +11,8 @@ from .models import SpeechRegion
 class ASMRPluginVAD(VADEngine):
     def __init__(self, config: dict[str, Any]):
         self.config = config
-        self.client = LocalVADClient()
+        self.client = AnalysisPluginClient(config.get("endpoint", "http://127.0.0.1:8006"),
+                                           "asmr-vad", "asmr-vad/1")
 
     async def detect(self, audio_path: str) -> list[SpeechRegion]:
         try:

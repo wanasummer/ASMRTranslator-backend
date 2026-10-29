@@ -64,16 +64,16 @@ uv run python main.py --help
 
 ### 外部人声检测与强制对齐
 
-桌面设置中的“人声检测与时间对齐”支持本地 VAD 和独立对齐服务：
+桌面设置中的“人声检测与时间对齐”支持两个独立插件服务：
 
 | 插件 | 默认地址 | 用途 |
 | --- | --- | --- |
-| ASMR VAD | 本地进程，无需地址 | 使用 Whisper VAD ONNX 检测日语耳语的人声区间 |
+| ASMR VAD | `http://127.0.0.1:8006` | 使用 Whisper VAD ONNX 检测日语耳语的人声区间 |
 | Qwen Force Align | `http://127.0.0.1:8007` | 使用 Qwen3 ForcedAligner 为日语原文预测词时间戳并组合句子 |
 
-安装包由插件仓库提供，可在插件安装器中导入本地 ZIP。ASMR VAD 需要 0.2.0 或更高版本：安装完成后自动出现在设置选项中，未安装或模型、运行环境缺失时隐藏。主程序从用户配置目录的 `ASMRTranstor/plugins.json` 读取安装位置，使用插件自带的 Python 通过 `asmr-vad-local/1` 标准输入输出协议离线推理，不需要启动插件管理器、HTTP 服务或日志网关。保留完整安装根目录（包括依赖环境和托管 Python）及安装记录即可持续使用；主程序重启后自动重新发现，任务内重复检测复用已加载的模型进程。Qwen Force Align 仍需启动服务，再扫描本地端口或填写局域网地址。
+安装包由插件仓库提供，可在插件安装器中导入本地 ZIP。安装完成并启动服务后，在主程序扫描本地端口并测试连接；也可填写局域网服务地址。
 
-CLI 对应 `--vad-backend asmr-vad`、`--vad-threshold`，以及 `--detect-stage --sentence-aligner qwen-force-align --qwen-align-endpoint`。`--vad-endpoint` 为旧配置兼容保留，本地 VAD 忽略该地址。默认仍使用内置 FSMN VAD，句子对齐默认关闭。桌面端的句子对齐用于 Fish ASR 或通用 ASR + 大模型翻译；后端对齐阶段在清洗、翻译与切音之前运行。异常时间戳、文本不匹配或服务故障会保留原片段，并写入 `detect_output/sentence_alignment.json`。已有字幕不调用这些插件，海南鸡专属 VAD 开启时不调用项目 VAD。
+CLI 对应 `--vad-backend asmr-vad`、`--vad-endpoint`、`--vad-threshold`，以及 `--detect-stage --sentence-aligner qwen-force-align --qwen-align-endpoint`。默认仍使用内置 FSMN VAD，句子对齐默认关闭。桌面端的句子对齐用于 Fish ASR 或通用 ASR + 大模型翻译；后端对齐阶段在清洗、翻译与切音之前运行。异常时间戳、文本不匹配或服务故障会保留原片段，并写入 `detect_output/sentence_alignment.json`。已有字幕不调用这两个服务，海南鸡专属 VAD 开启时不调用项目 VAD。
 
 模型和运行依赖均保存在独立插件环境中，主程序不需要安装 PyTorch、ONNX Runtime 或 qwen-asr。
 

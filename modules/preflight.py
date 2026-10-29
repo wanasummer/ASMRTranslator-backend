@@ -308,8 +308,8 @@ async def _check_analysis(config, *, service, api_version, key, default):
 
 
 async def _check_vad(config):
-    from .vad.local_runtime import check_local_vad
-    await asyncio.to_thread(check_local_vad)
+    await _check_analysis(config, service="asmr-vad", api_version="asmr-vad/1",
+                          key="asmrVadEndpoint", default="http://127.0.0.1:8006")
 
 
 async def _check_alignment(config):
@@ -333,7 +333,7 @@ async def run_preflight_check(service: str, config: Mapping[str, Any]) -> Prefli
         return PreflightResult(False, f"不支持的预检服务：{service or '未指定'}")
     try:
         await check(config)
-        return PreflightResult(True, "本地 ASMR VAD 模型已就绪" if service == "vad" else "配置正确，服务连接正常")
+        return PreflightResult(True, "配置正确，服务连接正常")
     except PreflightError as exc:
         return PreflightResult(False, str(exc))
     except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:

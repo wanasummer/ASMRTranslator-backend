@@ -125,7 +125,8 @@ class AnalysisAdapters(unittest.TestCase):
 
 class Preflight(unittest.IsolatedAsyncioTestCase):
     async def test_analysis_health_requires_correct_identity_and_ready_model(self):
-        for service, pid, api in (("alignment", "qwen-force-align", "qwen-force-align/1"),):
+        for service, pid, api in (("vad", "asmr-vad", "asmr-vad/1"),
+                                  ("alignment", "qwen-force-align", "qwen-force-align/1")):
             for identity, ready, expected in ((pid, True, True), ("wrong", True, False), (pid, False, False)):
                 def factory(**kwargs):
                     return httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200,
