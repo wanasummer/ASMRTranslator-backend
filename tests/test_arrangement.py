@@ -11,7 +11,10 @@ from modules.arrangement import (ArrangementError, initial_state, load_state, sa
                                  pipeline_tts_rates)
 from modules.arrangement_audio import ArrangementPlan, ArrangementAudioResult, PydubArrangementAdapter, perceived_db, write_arrangement_result
 from modules.arrangement_contracts import ArrangedClip
-from modules.llm_enhancer import LLMClient, LLMConfig, build_phase2_system, _parse_single_optimized_text
+from modules.llm import LLMConfig
+from modules.llm.factory import create_capabilities
+from modules.llm.tts_style import build_polish_system
+from modules.llm.parsing import _parse_single_optimized_text
 from modules.pipeline import run_arrangement_pipeline
 
 
@@ -214,18 +217,18 @@ class ArrangementTests(unittest.TestCase):
 
     def test_japanese_text_service_never_requests_chinese_translation(self):
         from modules.vtt_parser import VTTBlock
-        client = LLMClient(LLMConfig())
-        client._post = AsyncMock(return_value="7\t聞いてください。")
-        self.assertEqual(asyncio.run(client.optimize_japanese_text(VTTBlock(7, 0, 1, "中文"), "聞いてください")), "聞いてください。")
-        self.assertIn("不翻译成中文", client._post.call_args.args[0])
+        client = create_capabilities(LLMConfig())
+        client.runtime.complete = AsyncMock(return_value="7\t聞いてください。")
+        self.assertEqual(asyncio.run(client.polish.optimize_japanese_text(VTTBlock(7, 0, 1, "中文"), "聞いてください")), "聞いてください。")
+        self.assertIn("不翻译成中文", client.runtime.complete.call_args.args[0])
 
     def test_single_optimization_accepts_plain_text_or_model_renumbering(self):
         from modules.vtt_parser import VTTBlock
         for response in ("啊，烦死人了。", "1\t啊，烦死人了。", "```text\n啊，烦死人了。\n```", '{"text":"啊，烦死人了。"}'):
-            client = LLMClient(LLMConfig())
-            client._post = AsyncMock(return_value=response)
-            self.assertEqual(asyncio.run(client.optimize_chinese_text(VTTBlock(0, 0, 1, "啊...烦死人了"), "啊...烦死人了")), "啊，烦死人了。")
-            self.assertNotIn("0\t", client._post.call_args.args[1])
+            client = create_capabilities(LLMConfig())
+            client.runtime.complete = AsyncMock(return_value=response)
+            self.assertEqual(asyncio.run(client.polish.optimize_chinese_text(VTTBlock(0, 0, 1, "啊...烦死人了"), "啊...烦死人了")), "啊，烦死人了。")
+            self.assertNotIn("0\t", client.runtime.complete.call_args.args[1])
         self.assertEqual(_parse_single_optimized_text("2026 年见"), "2026 年见")
         self.assertEqual(_parse_single_optimized_text("3.14米"), "3.14米")
         self.assertEqual(_parse_single_optimized_text("1\t第一段\n2\t第二段"), "")
@@ -293,20 +296,20 @@ class ArrangementTests(unittest.TestCase):
 
     def test_tts_readability_rules_are_shared_with_existing_optimization(self):
         for backend in ("edge-tts", "fish-audio", "minimax-tts"):
-            prompt = build_phase2_system("", backend, "speech-2.8-hd")
+            prompt = build_polish_system("", backend, "speech-2.8-hd")
             self.assertIn("重叠", prompt)
             self.assertIn("数字", prompt)
             self.assertIn("不改变片段边界", prompt)
 
     def test_japanese_regeneration_calls_service_each_time(self):
         from modules.vtt_parser import VTTBlock
-        client = LLMClient(LLMConfig())
-        client._post = AsyncMock(return_value="7\t请听我说话。")
+        client = create_capabilities(LLMConfig())
+        client.runtime.complete = AsyncMock(return_value="7\t请听我说话。")
         block = VTTBlock(7, 0, 1000, "旧中文")
         for _ in range(2):
-            self.assertEqual(asyncio.run(client.optimize_from_japanese(block, "聞いてください")), "请听我说话。")
-        self.assertEqual(client._post.await_count, 2)
-        self.assertNotIn("旧中文", client._post.call_args.args[1])
+            self.assertEqual(asyncio.run(client.translation.optimize_from_japanese(block, "聞いてください")), "请听我说话。")
+        self.assertEqual(client.runtime.complete.await_count, 2)
+        self.assertNotIn("旧中文", client.runtime.complete.call_args.args[1])
 
     def test_gated_loudness_excludes_silence_and_handles_stereo_without_cancellation(self):
         from array import array
@@ -407,6 +410,16 @@ class ArrangementTests(unittest.TestCase):
             PydubArrangementAdapter().render(ArrangementPlan(Path("source.wav"), (
                 ArrangedClip(7, 9001, 11001, "过远", Path("last.wav"), 1, 3000, 4000),
             ), False))
+
+    def test_subdivided_unedited_sibling_clamps_to_next_explicit_interval(self):
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        (cache / "tts_0000.wav").touch()
+        (cache / "tts_0001.wav").touch()
+        self.state["segments"][1]["interval"] = {"start": 1400, "end": 2600}
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 2000)):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+        self.assertEqual([(clip.start_ms, clip.end_ms) for clip in plan.clips], [(0, 1400), (1400, 2600)])
 
 
 if __name__ == "__main__":

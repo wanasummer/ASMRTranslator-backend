@@ -1,3 +1,4 @@
+from tests.llm_support import subtitle_stage_factory
 """Japanese sentence detection, acoustic alignment, and pipeline handoff."""
 
 import copy
@@ -481,7 +482,7 @@ class PipelineHandoffTests(unittest.TestCase):
                 return_value=RecordingCleaner(),
             ))
             stack.enter_context(patch(
-                "modules.llm_enhancer.enhance_asr_blocks", side_effect=translate
+                "modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)
             ))
             stack.enter_context(patch(
                 "modules.detect.create_detect_stage", return_value=fake_stage

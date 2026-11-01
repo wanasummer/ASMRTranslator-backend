@@ -10,7 +10,7 @@ import aiohttp
 import httpx
 
 from modules import network
-from modules.llm_enhancer import LLMClient, LLMConfig
+from modules.llm import LLMRuntime, LLMConfig
 from modules.preflight import run_preflight_check
 
 
@@ -221,8 +221,8 @@ class AsyncRoutingTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(network, "AutoAsyncTransport", side_effect=lambda _policy: real_transport(network.NetworkPolicy(proxy_provider=lambda: {"https": PROXY}), factory)):
             result = await run_preflight_check("llm", {"llmProvider": "openai", "llmBaseUrl": "https://service.test", "llmModel": "test", "llmApiKey": "secret"})
             self.assertTrue(result.success)
-            client = LLMClient(LLMConfig(provider="openai", base_url="https://service.test", model="test", api_key="secret"))
-            self.assertEqual(await client._post("system", "input"), "ok")
+            client = LLMRuntime(LLMConfig(provider="openai", base_url="https://service.test", model="test", api_key="secret"))
+            self.assertEqual(await client.complete("system", "input"), "ok")
         self.assertEqual(calls, [None, PROXY, None, PROXY])
 
 

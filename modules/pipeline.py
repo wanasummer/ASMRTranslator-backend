@@ -96,6 +96,29 @@ def _clean_previous_run(output_dir: str) -> int:
     return removed
 
 
+def _serialize_parsed_vtt_block(block) -> dict:
+    row = {
+        "index": block.index,
+        "start_ms": block.start_ms,
+        "end_ms": block.end_ms,
+        "speaker": block.speaker,
+        "text": block.text,
+        "source_text": getattr(block, "source_text", ""),
+        "skip_tts": getattr(block, "skip_tts", False),
+    }
+    aligned = getattr(block, "aligned_sentence", None)
+    source_block_id = getattr(aligned, "source_block_id", None)
+    if source_block_id:
+        row["source_block_id"] = str(source_block_id)
+        source_start_ms = getattr(aligned, "source_start_ms", None)
+        source_end_ms = getattr(aligned, "source_end_ms", None)
+        if source_start_ms is not None:
+            row["source_start_ms"] = int(source_start_ms)
+        if source_end_ms is not None:
+            row["source_end_ms"] = int(source_end_ms)
+    return row
+
+
 def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None = None) -> tuple[list, str, str] | None:
     """Load the completed ASR boundary used by the next pipeline stage.
 
@@ -111,6 +134,7 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
     path = os.path.join(output_dir, "asr_subtitles", filename)
     if not os.path.isfile(path) or os.path.getsize(path) <= 0:
         return None
+    record = None
     if expected_key:
         from .task_cache import JsonResultCache, file_digest
         record = JsonResultCache(os.path.join(output_dir, "asr_stage_results")).load(expected_key)
@@ -122,6 +146,31 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
         return None
     if not blocks:
         return None
+    lineage = record.get("block_lineage") if isinstance(record, dict) else None
+    if isinstance(lineage, list) and len(lineage) == len(blocks):
+        from .detect.contracts import AlignedSentenceBlock
+        for block, meta in zip(blocks, lineage):
+            if not isinstance(meta, dict):
+                continue
+            if isinstance(meta.get("source_text"), str) and meta["source_text"]:
+                block.source_text = meta["source_text"]
+            if isinstance(meta.get("skip_tts"), bool):
+                block.skip_tts = meta["skip_tts"]
+            source_block_id = meta.get("source_block_id")
+            if isinstance(source_block_id, str) and source_block_id:
+                block.aligned_sentence = AlignedSentenceBlock(
+                    f"{source_block_id}-sentence-{block.index}",
+                    source_block_id,
+                    block.start_ms,
+                    block.end_ms,
+                    block.source_text or block.text,
+                    (source_block_id,),
+                    "cached-asr",
+                    "medium",
+                    "unknown",
+                    meta.get("source_start_ms"),
+                    meta.get("source_end_ms"),
+                )
     return blocks, language, path
 
 
@@ -249,7 +298,7 @@ def count_cjk_chars(text: str) -> int:
     return len(_CJK_RE.findall(text or ""))
 
 
-def mark_interjection_skips(blocks, max_chars: int = 3) -> int:
+def mark_interjection_skips(blocks, max_chars: int = 3, *, enabled: bool = True) -> int:
     """Flag blocks whose translated text is too short to dub.
 
     A block whose text holds ≤ ``max_chars`` Chinese characters (after removing
@@ -257,6 +306,8 @@ def mark_interjection_skips(blocks, max_chars: int = 3) -> int:
     ``block.skip_tts = True`` so the pipeline skips its translation TTS and keeps
     the original audio for that span. Returns the number of blocks flagged.
     """
+    if not enabled:
+        return 0
     flagged = 0
     for b in blocks:
         if not b.skip_tts and count_cjk_chars(b.text) <= max_chars:
@@ -280,8 +331,8 @@ def _vad_optimize_kwargs(vad_cfg: dict) -> dict:
 def _run_vad_stage(audio_path: str, vad_cfg: dict, output_dir: str) -> list:
     """Detect speech regions, optimize them into ASR slices, and persist artifacts.
 
-    Runs FSMN-VAD on the audio, merges short fragments into ASR-sized slices
-    (the 1500ms split / 25s cap come from run_pipeline's vad_* parameters), and
+    Runs the selected VAD adapter, merges fragments into ASR-sized slices using
+    its resolved policy (FSMN defaults or ASMR's own splitting parameters), and
     writes the raw regions + final slices under ``output_dir/vad_output/``.
     Returns the final slices. An unavailable/disabled VAD aborts the no-subtitle
     path (报错终止).
@@ -289,6 +340,8 @@ def _run_vad_stage(audio_path: str, vad_cfg: dict, output_dir: str) -> list:
     from .error import ASRError
     from .vad import create_vad, optimize_asmr_segments
 
+    from .vad.factory import resolve_vad_config
+    vad_cfg = resolve_vad_config(vad_cfg)
     vad_engine = create_vad(vad_cfg)
     if not vad_engine.available:
         reason = getattr(vad_engine, "reason", "未知原因")
@@ -360,13 +413,16 @@ def run_pipeline(
     vad_threshold: float = 0.5,
     sentence_detector: str = "mecab-japanese",
     detect_enabled: Optional[bool] = None,
+    skip_short_translations: bool = True,
 ) -> dict:
-    from .detect import DetectConfig, create_detect_stage, detect_eligible
+    from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature
     from .vad.stage import run_analysis_stage
+    from .vad.factory import resolve_vad_config
+    from .detect.atom_detectors import atom_detector_for_backend
     if not 0 < vad_threshold < 1:
         raise ValueError("VAD threshold must be between 0 and 1")
     detect_config = DetectConfig(aligner=sentence_aligner, qwen_endpoint=qwen_align_endpoint,
-                                 atom_detector="asmr-vad" if vad_backend == "asmr-vad" else "native-vad",
+                                 atom_detector=atom_detector_for_backend(vad_backend),
                                  vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
                                  sentence_detector=sentence_detector)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
@@ -441,15 +497,28 @@ def run_pipeline(
         asr_preserve_timeline = False
 
         from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+        vad_cfg = resolve_vad_config({
+            "enabled": vad_enabled,
+            "backend": vad_backend,
+            "endpoint": vad_endpoint,
+            "threshold": vad_threshold,
+            "max_end_silence_time": vad_max_end_silence_time,
+            "max_single_segment_time": vad_max_single_segment_time,
+            "min_sec": vad_min_sec,
+            "target_min_sec": vad_target_min_sec,
+            "target_max_sec": vad_target_max_sec,
+            "max_sec": vad_max_sec,
+            "max_merge_gap_sec": vad_max_merge_gap_sec,
+            "split_window_sec": vad_split_window_sec,
+            "split_overlap_sec": vad_split_overlap_sec,
+        })
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner,
-                "detect": [detect_enabled, sentence_aligner, sentence_detector, qwen_align_endpoint],
-                "vad": [vad_enabled, vad_backend, vad_endpoint, vad_threshold, vad_max_end_silence_time, vad_max_single_segment_time,
-                        vad_min_sec, vad_target_min_sec, vad_target_max_sec, vad_max_sec,
-                        vad_max_merge_gap_sec, vad_split_window_sec, vad_split_overlap_sec],
+                "detect": detect_cache_signature(detect_config) if detect_enabled else None,
+                "vad": vad_cfg,
             })
         cached_asr = _load_cached_asr(output_dir, asr_kwargs, asr_cache_key) if not vtt_path else None
         if cached_asr is not None:
@@ -476,21 +545,6 @@ def run_pipeline(
                 )
             # The VAD tuning lives on run_pipeline's vad_* parameters, so the
             # engine config passed here carries only the ASR/transcription knobs.
-            vad_cfg = {
-                "enabled": vad_enabled,
-                "backend": vad_backend,
-                "endpoint": vad_endpoint,
-                "threshold": vad_threshold,
-                "max_end_silence_time": vad_max_end_silence_time,
-                "max_single_segment_time": vad_max_single_segment_time,
-                "min_sec": vad_min_sec,
-                "target_min_sec": vad_target_min_sec,
-                "target_max_sec": vad_target_max_sec,
-                "max_sec": vad_max_sec,
-                "max_merge_gap_sec": vad_max_merge_gap_sec,
-                "split_window_sec": vad_split_window_sec,
-                "split_overlap_sec": vad_split_overlap_sec,
-            }
             print_progress("asr", "正在生成字幕", 0, 1)
             from .error import ASRError
             from .asr_engine import transcribe_slices
@@ -583,8 +637,13 @@ def run_pipeline(
                 cached_path = os.path.join(output_dir, "asr_subtitles", filename)
                 if os.path.isfile(cached_path):
                     JsonResultCache(os.path.join(output_dir, "asr_stage_results")).save(
-                        asr_cache_key, {"sha256": file_digest(cached_path),
-                                        "preserve_source_timeline": asr_preserve_timeline})
+                        asr_cache_key, {
+                            "sha256": file_digest(cached_path),
+                            "preserve_source_timeline": asr_preserve_timeline,
+                            "block_lineage": [
+                                _serialize_parsed_vtt_block(b) for b in blocks
+                            ],
+                        })
 
         speakers = set(b.speaker for b in blocks if b.speaker)
         if speakers:
@@ -600,14 +659,13 @@ def run_pipeline(
             llm_ctx = dict(llm_kwargs)
             llm_ctx.setdefault("tts_backend", tts_backend)
             llm_ctx.setdefault("tts_model", (tts_backend_kwargs or {}).get("model", ""))
-            if vtt_path or asr_output_language == "zh":
-                from .llm_enhancer import enhance_blocks
-                enhance_stats = enhance_blocks(blocks, llm_ctx, output_dir=output_dir)
-            else:
-                from .llm_enhancer import enhance_asr_blocks
-                blocks, enhance_stats = enhance_asr_blocks(
-                    blocks, llm_ctx, preserve_source_timeline=detect_stage is not None or asr_preserve_timeline,
-                    output_dir=output_dir)
+            from .subtitle_processing import create_subtitle_stage, SubtitleStageInput
+            subtitle_result = create_subtitle_stage(llm_ctx, output_dir).run(SubtitleStageInput(
+                tuple(blocks), source="subtitles" if vtt_path or asr_output_language == "zh" else "asr",
+                preserve_source_timeline=detect_stage is not None or asr_preserve_timeline,
+            ))
+            blocks = list(subtitle_result.blocks)
+            enhance_stats = subtitle_result.stats
 
         if not blocks:
             if tts_backend == "subtitles-only":
@@ -645,17 +703,13 @@ def run_pipeline(
         # Interjection blocks: a translation with ≤3 Chinese characters (after
         # removing punctuation) is mostly a 语气词/短叹 — skip its translation TTS
         # and keep the original audio for that span.
-        skipped = mark_interjection_skips(blocks)
+        skipped = mark_interjection_skips(blocks, enabled=skip_short_translations)
         if skipped:
             print(f"       [skip-tts] {skipped} 个语气词/短句片段将跳过翻译 TTS（保留原声）")
 
         _required_stage("OUTPUT_WRITE_DENIED", write_json,
-            os.path.join(intermediate_dir(output_dir, "debug"), "_parsed_vtt.json"), [{
-                "index": b.index, "start_ms": b.start_ms, "end_ms": b.end_ms,
-                "speaker": b.speaker, "text": b.text,
-                "source_text": getattr(b, "source_text", ""),
-                "skip_tts": getattr(b, "skip_tts", False),
-            } for b in blocks])
+            os.path.join(intermediate_dir(output_dir, "debug"), "_parsed_vtt.json"),
+            [_serialize_parsed_vtt_block(b) for b in blocks])
 
         # Export the optimized subtitles as a standalone WebVTT file (only when
         # the LLM actually rewrote something; otherwise there is nothing to show).

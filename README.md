@@ -45,20 +45,29 @@ uv run python main.py --help
 
 ## 处理流程
 
-```text
-  声音（原始音频）字幕可选
-    ↓ 字幕准备（二选一）
-     ├─ 有字幕 → parse_vtt 解析
-     └─ 无字幕 → VAD 检测人声 → 贪心切片 → ASR 多线程转写（标记时间线）
-    ↓ LLM 模块（唯一一次，切音之前）
-     ├─ ASR 路径 → 摘要 + 翻译切句 + 按句分配时间 + 润色
-     └─ 有字幕路径 → 摘要 + 润色
-    ↓ split 切分（按时间戳切原音频成句子片段）
-    ↓ TTS 模块（并行逐句配音）
-    ↓ 音频处理（防爆音/phantom DSP → 响度对齐）
-    ↓ 听音模式（替换/保留/同步/潜意识）
-    ↓ 拼接导出（follow_translation 截断 → join → concat → MP3+WAV）
+```mermaid
+flowchart LR
+    Audio["原始音频"] --> VAD["VAD 人声检测"]
+    VAD --> ASR["ASR 语音识别<br/>生成日语原文"]
+
+    subgraph Qwen["Qwen 独立路线"]
+        QAlign["日语词级对齐"] --> QSplit["独立规则分句"]
+    end
+
+    subgraph FSMN["FSMN / MeCab 路线"]
+        FDetect["日语句界 + 细粒度 VAD"] --> FAlign["时长估算 + 联合切分"]
+    end
+
+    ASR --> QAlign
+    ASR --> FDetect
+    QSplit --> Merge["统一字幕与时间轴<br/>日语清洗"]
+    FAlign --> Merge
+    Merge --> LLM["LLM<br/>摘要 → 翻译 → 可选润色"]
+    Subtitle["已有字幕"] --> LLM
+    LLM --> TTS["TTS 配音<br/>响度与时长调整"]
+    TTS --> Output["汇总输出<br/>音频合成 + 字幕导出"]
 ```
+
 
 ## 配置与日志
 
@@ -73,6 +82,8 @@ uv run python main.py --help
 正式构建可将 Workflow 提供的地址嵌入 EXE，运行时环境变量仍可覆盖。日志上报不需要 token。
 
 ## 开发与打包
+
+LLM 通过 `modules/llm/` 独立复用：`runtime.py` 负责请求、重试和缓存，`providers/` 负责服务商协议，`factory.py` 注册能力。每个能力单独放在 `capabilities/capXxx/`：`capSummary` 摘要、`capTranslation` 翻译、`capPolish` 润色及同语言编辑。字幕业务通过 `modules/subtitle_processing/` 调用这些能力并处理时间轴，返回新的字幕块；其他模块也可直接注入、调用所需能力。
 
 **运行测试**
 

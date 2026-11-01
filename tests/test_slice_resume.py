@@ -9,7 +9,8 @@ from unittest import mock
 from modules.asr.models import ASRResult, ASRSegment, AudioChunk
 from modules.asr_engine import _transcribe_chunks
 from modules.error import ASRError, LLMError, PipelineError, TTSError
-from modules.llm_enhancer import LLMClient, LLMConfig
+from modules.llm import LLMConfig
+from modules.llm.factory import create_capabilities
 from modules.task_cache import JsonResultCache
 from modules.tts_engine import generate_tts
 from modules.vtt_parser import VTTBlock
@@ -119,14 +120,14 @@ class SliceResumeTest(unittest.TestCase):
             return json.dumps([{"slice_id": i, "sentences": [f"翻译{i}"]}
                                for i in range(3) if f"原文{i}" in user])
         with tempfile.TemporaryDirectory() as directory:
-            client = LLMClient(cfg, directory)
-            with mock.patch.object(client, "_post", side_effect=respond):
+            client = create_capabilities(cfg, directory)
+            with mock.patch.object(client.runtime, "complete", side_effect=respond):
                 with self.assertRaises(PipelineError):
-                    asyncio.run(client.translate_split(blocks, "摘要"))
+                    asyncio.run(client.translation.translate(blocks, "摘要"))
                 self.assertEqual(len(calls), 3)
                 fail = False
                 calls.clear()
-                result = asyncio.run(client.translate_split(blocks, "摘要"))
+                result = asyncio.run(client.translation.translate(blocks, "摘要"))
                 self.assertEqual(len(calls), 1)
                 self.assertIn("原文1", calls[0])
                 self.assertEqual(set(result), {0, 1, 2})
@@ -134,24 +135,24 @@ class SliceResumeTest(unittest.TestCase):
     def test_llm_request_cache_survives_new_client(self):
         cfg = LLMConfig(provider="openai", model="test")
         with tempfile.TemporaryDirectory() as directory:
-            client = LLMClient(cfg, directory)
-            with mock.patch.object(client, "_post_uncached", new=mock.AsyncMock(return_value="结果")) as post:
-                self.assertEqual(asyncio.run(client._post("system", "user")), "结果")
+            client = create_capabilities(cfg, directory)
+            with mock.patch.object(client.runtime, "_post_uncached", new=mock.AsyncMock(return_value="结果")) as post:
+                self.assertEqual(asyncio.run(client.runtime.complete("system", "user")), "结果")
                 post.assert_awaited_once()
-            restored = LLMClient(cfg, directory)
-            with mock.patch.object(restored, "_post_uncached", new=mock.AsyncMock()) as post:
-                self.assertEqual(asyncio.run(restored._post("system", "user")), "结果")
+            restored = create_capabilities(cfg, directory)
+            with mock.patch.object(restored.runtime, "_post_uncached", new=mock.AsyncMock()) as post:
+                self.assertEqual(asyncio.run(restored.runtime.complete("system", "user")), "结果")
                 post.assert_not_awaited()
 
     def test_rejected_llm_slice_is_not_retried_repeatedly(self):
         cfg = LLMConfig(provider="openai", model="test", max_retries=3)
         blocks = [VTTBlock(0, 0, 1000, "拒绝片段")]
-        client = LLMClient(cfg)
-        with mock.patch.object(client, "_translate_split_once", new=mock.AsyncMock(return_value={})), \
-             mock.patch.object(client, "_translate_single", new=mock.AsyncMock(
+        client = create_capabilities(cfg)
+        with mock.patch.object(client.translation, "_translate_split_once", new=mock.AsyncMock(return_value={})), \
+             mock.patch.object(client.translation, "_translate_single", new=mock.AsyncMock(
                  side_effect=LLMError("content_policy_violation"))) as single:
             with self.assertRaises(PipelineError) as caught:
-                asyncio.run(client.translate_split(blocks, "摘要"))
+                asyncio.run(client.translation.translate(blocks, "摘要"))
             self.assertEqual(caught.exception.descriptor.code, "LLM_CONTENT_REJECTED")
             single.assert_awaited_once()
 
@@ -159,12 +160,12 @@ class SliceResumeTest(unittest.TestCase):
         cfg = LLMConfig(provider="openai", model="test", max_retries=0)
         blocks = [VTTBlock(0, 0, 1000, "原文")]
         with tempfile.TemporaryDirectory() as directory:
-            client = LLMClient(cfg, directory)
-            with mock.patch.object(client, "_post_uncached", new=mock.AsyncMock(return_value="malformed")):
+            client = create_capabilities(cfg, directory)
+            with mock.patch.object(client.runtime, "_post_uncached", new=mock.AsyncMock(return_value="malformed")):
                 with self.assertRaises(PipelineError):
-                    asyncio.run(client.translate_split(blocks, "摘要"))
-            restored = LLMClient(cfg, directory)
-            with mock.patch.object(restored, "_post_uncached", new=mock.AsyncMock(
+                    asyncio.run(client.translation.translate(blocks, "摘要"))
+            restored = create_capabilities(cfg, directory)
+            with mock.patch.object(restored.runtime, "_post_uncached", new=mock.AsyncMock(
                     return_value='[{"slice_id":0,"sentences":["你好"]}]')) as post:
-                self.assertEqual(asyncio.run(restored.translate_split(blocks, "摘要")), {0: ["你好"]})
+                self.assertEqual(asyncio.run(restored.translation.translate(blocks, "摘要")), {0: ["你好"]})
                 post.assert_awaited_once()

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from ..vad.contracts import AsrSlice, VadRegion
+from .qwen_config import QwenConfig
 
 
 class DetectError(RuntimeError):
@@ -93,6 +94,8 @@ class AlignedSentenceBlock:
     method: str
     confidence: str
     sentence_type: str = "unknown"
+    source_start_ms: int | None = None
+    source_end_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,8 @@ class AlignmentDependencies:
 
 @dataclass(frozen=True)
 class DetectConfig:
+    """Stage selection plus legacy FSMN settings; Qwen owns its own policy."""
+
     sentence_detector: str = "mecab-japanese"
     aligner: str = "joint-vad"
     qwen_endpoint: str = "http://127.0.0.1:8007"
@@ -179,6 +184,11 @@ class DetectConfig:
     vocalization_chars: str = "嗯啊阿哈哦喔呃唔呀哼欸诶あぁうぅんはぁえぇおぉっッー"
     vocalization_ratio: float = 0.72
     vocalization_run: int = 5
+    qwen: QwenConfig | None = None
+
+    def qwen_settings(self) -> QwenConfig:
+        """Adapt the legacy endpoint only; never inherit FSMN scoring knobs."""
+        return self.qwen or QwenConfig(endpoint=self.qwen_endpoint)
 
     def __post_init__(self):
         positive = (

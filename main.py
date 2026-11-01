@@ -224,6 +224,8 @@ Examples:
     parser.add_argument("--follow-translation-overhang", type=int, default=3000,
                         help="跟随翻译：允许翻译超出原声窗口的保底空白时长 ms（0-3000，"
                              "默认 3000；超出将截断）")
+    parser.add_argument("--no-skip-short-translations", action="store_true",
+                        help="为不超过 3 个汉字的短译文也生成配音（默认跳过并保留原声）")
     parser.add_argument("--no-tts-check", action="store_true",
                         help="Disable the post-TTS artifact check (male-voice/"
                              "mechanical detection + regenerate-once)")
@@ -648,6 +650,7 @@ Examples:
         phantom_virtual_fade=args.phantom_virtual_fade,
         follow_translation_overhang_ms=max(0, min(3000, args.follow_translation_overhang)),
         tts_check_artifact=not args.no_tts_check,
+        skip_short_translations=not args.no_skip_short_translations,
         follow_original_rate=max(1.0, min(1.25, args.follow_original_rate)),
         llm_kwargs=llm_kwargs,
         asr_kwargs=asr_kwargs,

@@ -21,7 +21,7 @@ from .network import async_client, async_operation
 
 from .asr import FunASRAdapter, QwenAudio31ASRFlashAdapter
 from .error import ASRError, LLMError
-from .llm_enhancer import LLMClient, LLMConfig, is_configured
+from .llm import LLMRuntime, LLMConfig, is_configured
 
 
 class PreflightError(RuntimeError):
@@ -93,7 +93,7 @@ async def _check_llm(config: Mapping[str, Any]) -> None:
     if not is_configured(llm_config):
         raise PreflightError("大模型配置不完整，请填写 Provider、模型和 API Key")
     try:
-        await LLMClient(llm_config).check_connection()
+        await LLMRuntime(llm_config).check_connection()
     except LLMError as exc:
         status = exc.context.get("status")
         if status == 503:

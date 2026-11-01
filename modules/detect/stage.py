@@ -115,6 +115,12 @@ class DefaultDetectStage:
             summary["eligibleSlices"] += result.outcome != "bypassed"
 
             for aligned in result.blocks:
+                if aligned.source_start_ms is None or aligned.source_end_ms is None:
+                    aligned = replace(
+                        aligned,
+                        source_start_ms=parent.speech_start_ms,
+                        source_end_ms=parent.speech_end_ms,
+                    )
                 sentence_slice = AsrSlice(
                     aligned.id,
                     aligned.start_ms,

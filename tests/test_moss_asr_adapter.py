@@ -1,3 +1,4 @@
+from tests.llm_support import subtitle_stage_factory
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -14,7 +15,7 @@ from modules.analysis_plugins import AnalysisPluginError
 from modules.error import ASRError
 from modules import preflight
 from modules.pipeline import run_pipeline
-from modules.llm_enhancer import _build_sentence_blocks
+from modules.subtitle_processing.timeline import _build_sentence_blocks
 
 
 def payload():
@@ -75,7 +76,7 @@ class MossPipelineTests(unittest.TestCase):
             output = Path(directory) / "work"
             with patch("modules.asr.create_asr", return_value=adapter), \
                     patch("modules.pipeline._run_vad_stage") as vad, \
-                    patch("modules.llm_enhancer.enhance_asr_blocks", side_effect=translate), \
+                    patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
                     patch("modules.detect.create_detect_stage") as detect, redirect_stdout(StringIO()):
                 for _ in range(2):
                     result = run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",

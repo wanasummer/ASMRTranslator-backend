@@ -73,7 +73,7 @@ class CommonTTSAdapter(TTSAdapter):
     def prepare_text(self, text: str) -> str:
         if self.manifest["capabilities"].get("text_policy") == "preserve":
             return text
-        from ..llm_enhancer import strip_emotion_tags
+        from ..text_normalization import strip_emotion_tags
         return strip_emotion_tags(text)
 
     def cache_inputs(self) -> dict:

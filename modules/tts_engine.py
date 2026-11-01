@@ -13,7 +13,7 @@ from typing import Optional
 
 from .tts import create_tts, EdgeTTSAdapter, TTSAdapter
 from .tts.models import TTSSegmentContext
-from .llm_enhancer import strip_emotion_tags
+from .text_normalization import strip_emotion_tags
 from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
 
 

@@ -85,6 +85,8 @@ class JointVadSentenceAligner:
                         "fallback-unsplit",
                         "low",
                         final_type,
+                        parent.speech_start_ms,
+                        parent.speech_end_ms,
                     ),
                 ),
                 tuple(attempts),
@@ -176,6 +178,8 @@ class JointVadSentenceAligner:
                 method,
                 confidence,
                 boundary.sentence_type,
+                parent.speech_start_ms,
+                parent.speech_end_ms,
             ))
 
         outcome = "exact" if len(blocks) == 1 else "aligned"
@@ -187,9 +191,9 @@ class JointVadSentenceAligner:
         )
 
 
-from .qwen_aligner import QwenForceAlignSentenceAligner
-
-ALIGNERS = {"joint-vad": JointVadSentenceAligner, "qwen-force-align": QwenForceAlignSentenceAligner}
+# This registry belongs to the FSMN/MeCab intermediate pipeline. Other detect
+# pipelines are selected by the stage factory, never through this registry.
+ALIGNERS = {"joint-vad": JointVadSentenceAligner}
 
 
 def create_sentence_aligner(

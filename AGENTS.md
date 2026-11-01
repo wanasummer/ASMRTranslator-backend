@@ -29,8 +29,22 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
   mutation behavior in the contract.
 - Preserve stable identifiers, ordering, and metadata across stage boundaries unless
   a stage contract explicitly owns changing them.
+- Keep Qwen Force Align and the FSMN/MeCab joint detector as separate intermediate
+  pipelines, selected by the detect-stage factory. Qwen owns its configuration and
+  word-timestamp sentence policy; FSMN owns speech atoms, mora estimates, and joint
+  partitioning. Both consume `DetectStageInput` and return `DetectStageResult` to
+  the common cleanup/translation/export flow. Do not route Qwen through the FSMN
+  aligner registry or pass FSMN sentence evidence into Qwen's partitioner.
+- Include the selected intermediate pipeline's effective settings and policy
+  version in its cache identity when changing its behavior.
 
 ## Code Conventions
+
+- Keep reusable LLM transport/providers in `modules/llm/`, with one capability
+  per `capabilities/capXxx/` directory and registration in `llm/factory.py`.
+  Capabilities consume typed text rows and an injected text-generation port;
+  they must not import pipeline, audio, or subtitle domain modules. Subtitle
+  timing and business orchestration belong in `modules/subtitle_processing/`.
 
 - Keep public contracts typed and explicit. Use dataclasses, TypedDicts, Protocols,
   or abstract base classes where they make boundaries clearer.

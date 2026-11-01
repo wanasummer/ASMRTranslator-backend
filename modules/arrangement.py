@@ -15,13 +15,13 @@ import os
 
 from .arrangement_contracts import ArrangementError, ArrangementState, ArrangementPlan, ArrangedClip
 from .io import write_json
-from .llm_enhancer import LLMClient, LLMConfig, is_configured
+from .llm import LLMConfig, is_configured
+from .subtitle_processing.editor import create_subtitle_editor
 from .tts_engine import get_tts_adapter, prepare_text_for_synthesis
 from .vtt_parser import VTTBlock
 
 
 class SubtitleOptimizer(Protocol):
-    async def phase2_optimize(self, blocks: list[VTTBlock], summary: str) -> dict[int, str]: ...
     async def optimize_from_japanese(self, block: VTTBlock, japanese: str) -> str: ...
     async def optimize_japanese_text(self, block: VTTBlock, japanese: str) -> str: ...
     async def optimize_chinese_text(self, block: VTTBlock, chinese: str) -> str: ...
@@ -235,7 +235,7 @@ def create_optimizer(config: dict) -> SubtitleOptimizer:
                     tts_model=config.get("minimaxModel", "") if config.get("ttsBackend") == "minimax-tts" else config.get("fishModel", ""))
     if not is_configured(cfg):
         raise ArrangementError("请先在识别与实验设置中配置字幕优化大模型")
-    return LLMClient(cfg)
+    return create_subtitle_editor(cfg)
 
 
 async def optimize_fragment(row: dict, client: SubtitleOptimizer, mode: str) -> dict:
@@ -390,6 +390,16 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
         if interval is None:
             start = max(previous_end, baseline["start_ms"])
             end = start + round((sample_end - sample_start) / pipeline_rates.get(baseline["index"], 1))
+            next_explicit_start = next(
+                (
+                    round(later["interval"]["start"])
+                    for later in state["segments"][position + 1:]
+                    if not later.get("deleted", False) and later.get("interval") is not None
+                ),
+                None,
+            )
+            if next_explicit_start is not None and start < next_explicit_start < end:
+                end = next_explicit_start
         else:
             start, end = round(interval["start"]), round(interval["end"])
         if start < previous_end:

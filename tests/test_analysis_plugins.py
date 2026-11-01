@@ -12,11 +12,12 @@ from unittest.mock import patch
 import httpx
 
 from modules.analysis_plugins import AnalysisPluginClient, AnalysisPluginError, validate_endpoint, validate_timeline
-from modules.detect.contracts import AlignmentRequest, DetectConfig
-from modules.detect.qwen_aligner import QwenForceAlignSentenceAligner
+from modules.detect import create_detect_stage
+from modules.detect.contracts import AlignmentRequest, DetectConfig, DetectStageInput, JapaneseToken, SentenceBoundary, SentenceDetection
+from modules.detect.qwen_aligner import QwenForceAlignDetectStage, QwenForceAlignSentenceAligner
 from modules.detect.sentence_detectors import ConservativeJapaneseTokenizer, MecabJapaneseSentenceDetector
 from modules.detect.stage import DefaultDetectStage
-from modules.detect.contracts import DetectStageInput
+from modules.pipeline import _serialize_parsed_vtt_block
 from modules.vad.contracts import AsrSlice
 from modules.vad.engine import create_vad
 from modules.vtt_parser import VTTBlock
@@ -95,9 +96,10 @@ class AnalysisAdapters(unittest.TestCase):
             calls.append(kwargs)
             return {"words": [{"text": "今日は休みです", "start_ms": 100, "end_ms": 1400},
                                {"text": "明日は仕事です", "start_ms": 1700, "end_ms": 3600}]}, 4000
-        aligner = QwenForceAlignSentenceAligner(DetectConfig(), SimpleNamespace(audio_path="source.wav"),
+        config = DetectConfig(aligner="qwen-force-align")
+        aligner = QwenForceAlignSentenceAligner(config, SimpleNamespace(audio_path="source.wav"),
                                                client=SimpleNamespace(request=request))
-        stage = DefaultDetectStage(DetectConfig(), SimpleNamespace(detect=lambda _: detection), aligner)
+        stage = QwenForceAlignDetectStage(config, "source.wav", aligner=aligner)
         source = VTTBlock(index=0, start_ms=1000, end_ms=5000, text=detection.normalized_text,
                           source_text=detection.normalized_text, asr_slice=parent)
         with tempfile.TemporaryDirectory() as directory:
@@ -105,11 +107,16 @@ class AnalysisAdapters(unittest.TestCase):
             audit = json.loads((Path(directory) / "detect_output/sentence_alignment.json").read_text(encoding="utf-8"))
         self.assertEqual([row.text for row in result.blocks], ["今日は休みです。", "明日は仕事です。"])
         self.assertEqual([(row.start_ms, row.end_ms) for row in result.blocks], [(1100, 2400), (2700, 4600)])
+        self.assertEqual(
+            [(row.aligned_sentence.source_block_id, row.aligned_sentence.source_start_ms, row.aligned_sentence.source_end_ms)
+             for row in result.blocks],
+            [("slice-1", 1000, 5000), ("slice-1", 1000, 5000)],
+        )
         self.assertEqual(source.start_ms, 1000)
         self.assertTrue(all(row.asr_slice.region_ids == parent.region_ids for row in result.blocks))
         self.assertEqual(audit["summary"]["alignedSlices"], 1)
         self.assertEqual(calls[0], {"start_ms": 1000, "end_ms": 5000})
-        from modules.llm_enhancer import _build_sentence_blocks
+        from modules.subtitle_processing.timeline import _build_sentence_blocks
         translated = _build_sentence_blocks(result.blocks, {
             0: ["今天休息。", "不需要上班。"], 1: ["明天要工作。"],
         }, preserve_source_timeline=True)
@@ -117,6 +124,81 @@ class AnalysisAdapters(unittest.TestCase):
             (1100, 2400, "今天休息。不需要上班。"), (2700, 4600, "明天要工作。"),
         ])
         self.assertEqual([row.source_text for row in translated], [row.text for row in result.blocks])
+        serialized = [_serialize_parsed_vtt_block(row) for row in translated]
+        self.assertEqual(
+            [(row["source_block_id"], row["source_start_ms"], row["source_end_ms"]) for row in serialized],
+            [("slice-1", 1000, 5000), ("slice-1", 1000, 5000)],
+        )
+
+    def test_qwen_standalone_stage_bypasses_mecab_and_vocalization_filter(self):
+        with patch("modules.detect.factory.create_sentence_detector", side_effect=AssertionError("MeCab loaded")), \
+             patch("modules.detect.factory.create_atom_detector", side_effect=AssertionError("VAD loaded")):
+            stage = create_detect_stage(DetectConfig(aligner="qwen-force-align"), "source.wav")
+        self.assertIsInstance(stage, QwenForceAlignDetectStage)
+        parent = AsrSlice("slice-breath", 0, 8000, 0, 8000, ("region-1",))
+        text = "はぁ...はぁ...お姉さんにいっぱい甘えましょうね。気持ちよくなりましょうね。"
+        words = [
+            {"text": "はぁ", "start_ms": 100, "end_ms": 300},
+            {"text": "はぁ", "start_ms": 350, "end_ms": 550},
+            {"text": "お姉さんにいっぱい甘えましょうね", "start_ms": 700, "end_ms": 3200},
+            {"text": "気持ちよくなりましょうね", "start_ms": 3800, "end_ms": 6800},
+        ]
+        stage.aligner.client = SimpleNamespace(request=lambda *args, **kwargs: ({"words": words}, 8000))
+        source = VTTBlock(index=0, start_ms=0, end_ms=8000, text=text, source_text=text, asr_slice=parent)
+        with tempfile.TemporaryDirectory() as directory:
+            result = stage.run(DetectStageInput((source,)), directory)
+        self.assertEqual(result.summary["bypassedSlices"], 0)
+        self.assertEqual(result.summary["alignedSlices"], 1)
+        self.assertEqual(
+            [b.text for b in result.blocks],
+            ["はぁ...はぁ...お姉さんにいっぱい甘えましょうね。", "気持ちよくなりましょうね。"],
+        )
+        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(100, 3200), (3800, 6800)])
+
+    def test_qwen_short_single_word_expands_to_min_duration_without_failing(self):
+        parent = AsrSlice("slice-short", 128900, 130460, 128900, 130460, ("region-1",))
+        detection = SentenceDetection("うん.", (), (), "qwen-force-align", 1.0)
+        aligner = QwenForceAlignSentenceAligner(
+            DetectConfig(aligner="qwen-force-align"),
+            SimpleNamespace(audio_path="source.wav"),
+            client=SimpleNamespace(request=lambda *args, **kwargs: (
+                {"words": [{"text": "うん", "start_ms": 480, "end_ms": 560}]}, 1560
+            )),
+        )
+        result = aligner.align(AlignmentRequest(parent, parent.id, detection))
+        self.assertEqual(result.outcome, "exact")
+        self.assertGreaterEqual(result.blocks[0].end_ms - result.blocks[0].start_ms, 280)
+        self.assertGreaterEqual(result.blocks[0].start_ms, 128900)
+        self.assertLessEqual(result.blocks[0].end_ms, 130460)
+
+    def test_qwen_splits_unpunctuated_speech_across_acoustic_pause_and_skips_short_cut(self):
+        parent = AsrSlice("slice-2", 900, 6100, 1000, 6000, ("region-1",))
+        text = "あ今日は休みです明日は仕事です"
+        tokens = (
+            JapaneseToken("あ", 0, 1),
+            JapaneseToken("今日は休みです", 1, 8),
+            JapaneseToken("明日は仕事です", 8, 15),
+        )
+        boundaries = (
+            SentenceBoundary(1, 1, 0.85, "interjection", ("terminal_punctuation",)),
+            SentenceBoundary(2, 8, 0.42, "statement", ("new_clause_starter",)),
+            SentenceBoundary(3, 15, 0.90, "statement", ("sentence_end",)),
+        )
+        detection = SentenceDetection(text, tokens, boundaries, "mecab-japanese", 0.75)
+        words = [
+            {"text": "あ", "start_ms": 0, "end_ms": 120},
+            {"text": "今日は休みです", "start_ms": 140, "end_ms": 1800},
+            {"text": "明日は仕事です", "start_ms": 2550, "end_ms": 4500},
+        ]
+        aligner = QwenForceAlignSentenceAligner(
+            DetectConfig(),
+            SimpleNamespace(audio_path="source.wav"),
+            client=SimpleNamespace(request=lambda *args, **kwargs: ({"words": words}, 5000)),
+        )
+        result = aligner.align(AlignmentRequest(parent, parent.id, detection))
+        self.assertEqual(result.outcome, "aligned")
+        self.assertEqual([b.text for b in result.blocks], ["あ今日は休みです", "明日は仕事です"])
+        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(1000, 2800), (3550, 5500)])
 
     def test_qwen_failure_retains_parent_and_reports_fallback(self):
         parent, detection = self.detection()

@@ -1,6 +1,6 @@
-"""Native FSMN and external ASMR VAD engines, plus the unavailable fallback.
+"""Native FSMN VAD adapter and backwards-compatible factory exports.
 
-VAD runs entirely through the bundled native component (``modules/vad/native``):
+FSMN runs through the bundled native component (``modules/vad/native``):
 a ctypes wrapper around the compiled ``fsmn_vad.dll`` (C++ port of FSMN-VAD,
 sources under ``modules/vad/cpp``) plus the GGUF weights (``model/fsmn-vad.gguf``,
 ~1.7 MB). There is no funasr/torch dependency — the torch fallback was removed
@@ -17,9 +17,10 @@ pause exceeds ``max_end_silence_time`` (interval) and force-cut past
 """
 
 import asyncio
-from abc import ABC, abstractmethod
 
 from ..error import VADUnavailableError
+from .base import NoOpVAD, VADEngine
+from .factory import create_vad, resolve_vad_config
 from .models import SpeechRegion
 
 
@@ -34,34 +35,6 @@ def _load_native_vad():
     if not native_available():
         return None
     return NativeVAD()
-
-
-class VADEngine(ABC):
-    """Detect speech regions in an audio file."""
-
-    @property
-    def available(self) -> bool:
-        """Whether this engine can actually run detection (True for a live one)."""
-        return True
-
-    @abstractmethod
-    async def detect(self, audio_path: str) -> list[SpeechRegion]:
-        """Return raw speech regions as absolute ``(start, end)`` seconds."""
-        ...
-
-
-class NoOpVAD(VADEngine):
-    """Placeholder engine — never runs; signals VAD is unavailable/disabled."""
-
-    def __init__(self, reason: str = "VAD 未启用"):
-        self.reason = reason
-
-    @property
-    def available(self) -> bool:
-        return False
-
-    async def detect(self, audio_path: str) -> list[SpeechRegion]:
-        return []
 
 
 class FSMNVAD(VADEngine):
@@ -126,30 +99,3 @@ class FSMNVAD(VADEngine):
                 descriptor("VAD_INFERENCE_FAILED"), detail=str(error), cause=error,
                 context={"backend": "fsmn-vad"},
             ) from error
-
-
-def create_vad(cfg: dict) -> VADEngine:
-    """Build the VAD engine for a config dict, falling back to ``NoOpVAD``.
-
-    Returns a ``NoOpVAD`` (``available=False``) when VAD is disabled in the
-    config or the native component (fsmn_vad.dll / fsmn-vad.gguf) is missing
-    or fails to load. Plugin configuration errors are raised at construction;
-    local plugin inference errors are raised by the selected adapter.
-    """
-    if not cfg.get("enabled", True):
-        return NoOpVAD("vad.enabled=false")
-    backend = cfg.get("backend", "fsmn-vad")
-    if backend == "asmr-vad":
-        from .plugin import ASMRPluginVAD
-        return ASMRPluginVAD(cfg)
-    if backend != "fsmn-vad":
-        raise ValueError(f"Unknown VAD backend: {backend}")
-    try:
-        return FSMNVAD(
-            model=cfg.get("model", "fsmn-vad"),
-            max_single_segment_time=cfg.get("max_single_segment_time", 25000),
-            max_end_silence_time=cfg.get("max_end_silence_time", 1500),
-            strict=cfg.get("strict", False),
-        )
-    except VADUnavailableError as e:
-        return NoOpVAD(str(e))
