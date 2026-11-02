@@ -390,17 +390,16 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
         if interval is None:
             start = baseline["start_ms"]
             end = start + round((sample_end - sample_start) / pipeline_rates.get(baseline["index"], 1))
-            next_explicit_start = next(
+            next_sentence_start = next(
                 (
                     round(later["interval"]["start"] if later.get("interval") is not None else later_baseline["start_ms"])
-                    for later_position, (later_baseline, later) in enumerate(
-                        zip(rows[position + 1:], state["segments"][position + 1:]), position + 1)
-                    if not later.get("deleted", False) and (later.get("replacement") or cached_tts(work, later_position))
+                    for later_baseline, later in zip(rows[position + 1:], state["segments"][position + 1:])
+                    if not later.get("deleted", False)
                 ),
                 None,
             )
-            if next_explicit_start is not None and start < next_explicit_start < end:
-                end = next_explicit_start
+            if next_sentence_start is not None and start < next_sentence_start < end:
+                end = next_sentence_start
         else:
             start, end = round(interval["start"]), round(interval["end"])
         if start < previous_end:
