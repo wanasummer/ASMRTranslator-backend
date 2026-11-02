@@ -52,7 +52,7 @@ class PydubArrangementAdapter:
                 raise ArrangementError(f"片段 {clip.index} 的 TTS 音频为空")
             target_ms = clip.end_ms - clip.start_ms
             required_tempo = len(audio) / target_ms
-            tempo = max(.5, min(2, required_tempo))
+            tempo = max(.5, required_tempo)
             if abs(required_tempo - tempo) > .001:
                 print(f"[arrangement] 片段 {clip.index}: 语速限制为 {tempo:.2f}×，按试听区间截取或保留尾部原声")
             if abs(tempo - 1) > .001:

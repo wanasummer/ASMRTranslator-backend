@@ -44,6 +44,35 @@ class ArrangementTests(unittest.TestCase):
             plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
         self.assertEqual([(clip.start_ms, clip.end_ms) for clip in plan.clips], [(0, 2000), (2000, 3667)])
 
+    def test_long_default_voice_keeps_next_sentence_start_and_complete_source(self):
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        for position in range(2):
+            (cache / f"tts_{position:04d}.wav").touch()
+        with patch("pydub.AudioSegment.from_file", side_effect=[
+            MagicMock(__len__=lambda _: 8000), MagicMock(__len__=lambda _: 1000)
+        ]):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+        self.assertEqual([(clip.start_ms, clip.end_ms) for clip in plan.clips], [(0, 2000), (2000, 3000)])
+        self.assertEqual(plan.clips[0].sample_end_ms, 8000)
+
+    def test_render_accelerates_complete_voice_beyond_two_times(self):
+        from array import array
+        from pydub import AudioSegment
+        original = AudioSegment(array("h", [2000] * 4000).tobytes(), sample_width=2, frame_rate=1000, channels=1)
+        voice = AudioSegment(array("h", [4000] * 8000).tobytes(), sample_width=2, frame_rate=1000, channels=1)
+        compressed = AudioSegment(array("h", [4000] * 2000).tobytes(), sample_width=2, frame_rate=1000, channels=1)
+        plan = ArrangementPlan(Path("source.wav"), (
+            ArrangedClip(7, 0, 2000, "long", Path("voice.wav"), 1, 0, 2000),
+        ), False)
+        adapter = PydubArrangementAdapter()
+        with patch("pydub.AudioSegment.from_file", side_effect=[original, voice]), \
+             patch.object(adapter, "stretch", return_value=compressed) as stretch:
+            result = adapter.render(plan)
+        self.assertEqual(len(stretch.call_args.args[0]), 8000)
+        self.assertEqual(stretch.call_args.args[1], 2000)
+        self.assertEqual(len(result.audio), 4000)
+
     def test_tts_sample_changes_plan_source_without_changing_saved_tempo(self):
         cache = self.work / "chunk_0/02_tts"
         cache.mkdir(parents=True)

@@ -388,13 +388,14 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
         if sample is not None and (sample_start < 0 or sample_end > audio_length or sample_end <= sample_start):
             raise ArrangementError(f"片段 {baseline['index']} 的 TTS 取样超出音频范围")
         if interval is None:
-            start = max(previous_end, baseline["start_ms"])
+            start = baseline["start_ms"]
             end = start + round((sample_end - sample_start) / pipeline_rates.get(baseline["index"], 1))
             next_explicit_start = next(
                 (
-                    round(later["interval"]["start"])
-                    for later in state["segments"][position + 1:]
-                    if not later.get("deleted", False) and later.get("interval") is not None
+                    round(later["interval"]["start"] if later.get("interval") is not None else later_baseline["start_ms"])
+                    for later_position, (later_baseline, later) in enumerate(
+                        zip(rows[position + 1:], state["segments"][position + 1:]), position + 1)
+                    if not later.get("deleted", False) and (later.get("replacement") or cached_tts(work, later_position))
                 ),
                 None,
             )
