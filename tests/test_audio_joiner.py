@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import read_text
 """Tests for modules.audio_joiner (follow-original cap-accelerate + follow-translation cap).
 
 Run from the project root:  python -m unittest tests.test_audio_joiner
@@ -250,7 +252,7 @@ class BudgetTest(unittest.TestCase):
             seg = _tts_seg(d, 2, 6000, budget=2000)
             enforce_tts_budget([seg])
             self.assertEqual(self._len(seg), 2000)
-            self.assertEqual(json.loads((Path(d) / "tts_tempo_0002.json").read_text())["rate"], 2.0)
+            self.assertEqual(json.loads(read_text(Path(d) / "tts_tempo_0002.json"))["rate"], 2.0)
 
     def test_follow_translation_allows_pad_window(self):
         # mode=follow_translation → effective = 1000 + 3000 = 4000; 8000/4000 = 2.0
@@ -311,7 +313,7 @@ class JoinShortSegmentTest(unittest.TestCase):
             self.assertEqual(exported[0][1].raw_data, expected.raw_data)
             self.assertEqual(len(exported[0][1]), 350)
             self.assertEqual(segments, original_segments)
-            with open(os.path.join(directory, "output.join_audit.json"), encoding="utf-8") as file:
+            with StringIO(read_text(os.path.join(directory, "output.join_audit.json"))) as file:
                 audit = json.load(file)
             self.assertEqual(audit["joined_count"], 3)
             self.assertEqual([item["index"] for item in audit["skipped_segments"]],
@@ -407,7 +409,7 @@ class JoinTimelineTest(unittest.TestCase):
             result = self.join(d, [1000, 20, 800], overlap=200)
             self.assertEqual([(p.block_id, p.start_ms, p.end_ms) for p in result.placements],
                              [("10", 0, 1000), ("12", 800, 1600)])
-            with open(os.path.join(d, "output.join_audit.json"), encoding="utf-8") as file:
+            with StringIO(read_text(os.path.join(d, "output.join_audit.json"))) as file:
                 audit = json.load(file)
             self.assertEqual([p["block_id"] for p in audit["placements"]], ["10", "12"])
             self.assertEqual([p["index"] for p in audit["skipped_segments"]], [1])

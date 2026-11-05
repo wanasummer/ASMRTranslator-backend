@@ -3,7 +3,7 @@
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from ..io import write_json
+from ..storage import save_json
 from .contracts import DetectError
 
 
@@ -18,8 +18,10 @@ def _json_value(value):
 
 
 def write_detect_artifact(output_dir, name, payload):
+    from ..storage import initialize_project
+    initialize_project(output_dir)
     try:
-        return write_json(str(Path(output_dir) / "detect_output" / name),
+        return save_json(str(Path(output_dir) / "detect_output" / name),
                           {"schemaVersion": 1, **_json_value(payload)})
     except (OSError, TypeError, ValueError) as exc:
         raise DetectError("DETECT_ARTIFACT_WRITE_FAILED", f"Cannot write {name}") from exc

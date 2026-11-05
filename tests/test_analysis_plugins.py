@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """External analysis adapters preserve transcript identity and timeline lineage."""
 from contextlib import contextmanager
 from dataclasses import replace
@@ -104,7 +105,7 @@ class AnalysisAdapters(unittest.TestCase):
                           source_text=detection.normalized_text, asr_slice=parent)
         with tempfile.TemporaryDirectory() as directory:
             result = stage.run(DetectStageInput((source,)), directory)
-            audit = json.loads((Path(directory) / "detect_output/sentence_alignment.json").read_text(encoding="utf-8"))
+            audit = json.loads(read_text(Path(directory) / "detect_output/sentence_alignment.json"))
         self.assertEqual([row.text for row in result.blocks], ["今日は休みです。", "明日は仕事です。"])
         self.assertEqual([(row.start_ms, row.end_ms) for row in result.blocks], [(1100, 2400), (2700, 4600)])
         self.assertEqual(

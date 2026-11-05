@@ -6,15 +6,13 @@ import hashlib
 import json
 import math
 import re
-import shutil
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
-from contextlib import contextmanager
-import os
 
+from .arrangement_repository import ArrangementRepository, create_arrangement_repository
 from .arrangement_contracts import ArrangementError, ArrangementState, ArrangementPlan, ArrangedClip
-from .io import write_json
+from .storage import save_json, read_bytes, read_json, address
 from .llm import LLMConfig, is_configured
 from .subtitle_processing.editor import create_subtitle_editor
 from .tts_engine import get_tts_adapter, prepare_text_for_synthesis
@@ -30,7 +28,7 @@ class SubtitleOptimizer(Protocol):
 def read_baseline(work: Path) -> tuple[list[dict], str]:
     path = work / "debug/_parsed_vtt.json"
     try:
-        raw = path.read_bytes()
+        raw = read_bytes(path)
         rows = json.loads(raw)
     except (OSError, ValueError) as exc:
         raise ArrangementError("没有可读取的片段字幕，请先完成自动配音") from exc
@@ -97,69 +95,28 @@ def validate_state(work: Path, state: ArrangementState) -> ArrangementState:
     return state
 
 
-def load_state(work: Path) -> ArrangementState:
-    path = work / "arrangement/draft.json"
-    if not path.exists():
-        return initial_state(work)
-    try:
-        saved = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ArrangementError("编排草稿无法读取") from exc
-    if not isinstance(saved, dict):
-        raise ArrangementError("编排草稿格式无效")
+def load_state(work: Path, repository: ArrangementRepository | None = None) -> ArrangementState:
+    saved = (repository or create_arrangement_repository(work)).load()
     baseline = initial_state(work)
-    if saved.get("sourceVersion") != baseline["sourceVersion"]:
-        # Positional IDs can be reused after resegmentation. Only the exact
-        # source fingerprint proves that text and timing edits still belong.
-        # Keep the old draft on disk; save_state backs it up on the next save.
+    if saved is None or saved.get("sourceVersion") != baseline["sourceVersion"]:
         return baseline
     return validate_state(work, saved)
 
 
-def save_state(work: Path, state: ArrangementState) -> ArrangementState:
+def save_state(work: Path, state: ArrangementState, repository: ArrangementRepository | None = None) -> ArrangementState:
     validate_state(work, state)
-    path = work / "arrangement/draft.json"
-    temporary = path.with_suffix(f".{uuid4().hex}.tmp")
-    write_json(str(temporary), state)
-    if path.exists():
-        try:
-            previous = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            previous = None
-        if not isinstance(previous, dict) or previous.get("sourceVersion") != state["sourceVersion"]:
-            shutil.copy2(path, path.with_name(f"draft.stale.{uuid4().hex}.json"))
-    temporary.replace(path)
+    (repository or create_arrangement_repository(work)).save(state)
     return state
 
 
-@contextmanager
 def draft_lock(work: Path):
-    directory = work / "arrangement"
-    directory.mkdir(parents=True, exist_ok=True)
-    with open(directory / ".draft.lock", "a+b") as lock:
-        if lock.tell() == 0:
-            lock.write(b"0"); lock.flush()
-        lock.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            lock.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+    return create_arrangement_repository(work).transaction()
 
 
 def commit_optimized_fragment(work: Path, payload: dict) -> dict:
     """Merge a background result into the latest draft, preserving concurrent edits."""
-    with draft_lock(work):
-        state = load_state(work)
+    with draft_lock(work) as repository:
+        state = load_state(work, repository)
         position = payload["position"]
         expected, optimized = payload["fragment"], payload["optimizedFragment"]
         if (state["sourceVersion"] != payload["sourceVersion"] or not isinstance(position, int)
@@ -182,7 +139,7 @@ def commit_optimized_fragment(work: Path, payload: dict) -> dict:
         if not isinstance(optimized.get(target), str) or not optimized[target].strip():
             raise ArrangementError("优化结果为空")
         current[target] = optimized[target]
-        save_state(work, state)
+        save_state(work, state, repository)
         return {"edit": current, "applied": True}
 
 
@@ -203,27 +160,14 @@ def cached_tts(work: Path, position: int) -> Path | None:
 
 
 def pipeline_tts_rates(work: Path) -> dict[int, float]:
-    """Read the tempo actually chosen by the last completed backend build."""
-    rates: dict[int, float] = {}
-    for path in (work / "chunk_0/02_tts").glob("tts_tempo_*.json"):
-        try:
-            index = int(path.stem.removeprefix("tts_tempo_"))
-            rate = float(json.loads(path.read_text(encoding="utf-8"))["rate"])
-            if math.isfinite(rate) and rate > 0:
-                rates[index] = rate
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-    for path in sorted(work.glob("pipeline_*.log"), reverse=True):
-        try:
-            log = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if "Pipeline complete!" not in log:
-            continue
-        logged = {int(index): float(rate) for index, rate in re.findall(
-            r"\[budget\] seg (\d+):[^\n]*?加速([0-9]+(?:\.[0-9]+)?)x", log
-        )}
-        return {**logged, **rates}
+    target = address(work / "chunk_0/02_tts/tts_tempo_")
+    rates = {}
+    for key in target.store.keys(target.scope, target.key):
+        value = read_json(work / key)
+        index = int(Path(key).stem.removeprefix("tts_tempo_"))
+        rate = float(value["rate"])
+        if math.isfinite(rate) and rate > 0:
+            rates[index] = rate
     return rates
 
 
@@ -315,25 +259,25 @@ def run_editor_request(payload: dict) -> dict:
         if not isinstance(fragment.get("text"), str) or not isinstance(fragment.get("japanese"), str):
             raise ArrangementError("字幕草稿格式无效")
         audit = work / f"arrangement/audit/{uuid4().hex}"
-        write_json(str(audit.with_suffix(".before.json")), fragment)
+        save_json(str(audit.with_suffix(".before.json")), fragment)
         try:
             edit = asyncio.run(optimize_fragment(fragment, create_optimizer(payload["config"]), payload["mode"]))
         except Exception as error:
             from .error import unexpected_error
-            write_json(str(audit.with_suffix(".error.json")), unexpected_error(error).to_payload())
+            save_json(str(audit.with_suffix(".error.json")), unexpected_error(error).to_payload())
             raise
-        write_json(str(audit.with_suffix(".after.json")), edit)
+        save_json(str(audit.with_suffix(".after.json")), edit)
         # A separate commit merges only target text into the latest saved draft.
         return {"edit": edit}
     state = validate_state(work, payload["state"])
     if action == "save":
-        with draft_lock(work):
-            return {"state": save_state(work, state)}
+        with draft_lock(work) as repository:
+            return {"state": save_state(work, state, repository)}
     if action in ("optimize", "optimize-all"):
-        write_json(str(work / f"arrangement/audit/{uuid4().hex}-before.json"), state)
+        save_json(str(work / f"arrangement/audit/{uuid4().hex}-before.json"), state)
         state = asyncio.run(optimize_subtitles(state, create_optimizer(payload["config"]),
                                               payload.get("position") if action == "optimize" else None))
-        write_json(str(work / f"arrangement/audit/{uuid4().hex}-after.json"), state)
+        save_json(str(work / f"arrangement/audit/{uuid4().hex}-after.json"), state)
         return {"state": save_state(work, state)}
     if action == "regenerate":
         position = payload["position"]
@@ -343,12 +287,12 @@ def run_editor_request(payload: dict) -> dict:
         edit = state["segments"][position]
         replacement = asyncio.run(synthesize_edit(work, {**rows[position], **edit},
                                                   payload["config"], payload["ttsKwargs"]))
-        with draft_lock(work):
-            latest = load_state(work)
+        with draft_lock(work) as repository:
+            latest = load_state(work, repository)
             if latest["segments"][position]["text"] == edit["text"]:
                 latest["segments"][position]["replacement"] = replacement
                 latest["segments"][position]["ttsSample"] = None
-            return {"state": save_state(work, latest)}
+            return {"state": save_state(work, latest, repository)}
     raise ArrangementError("未知编排操作")
 
 

@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """Model-free tests for schema, per-segment isolation and the HTTP boundary."""
 
 import asyncio
@@ -163,7 +164,7 @@ class AdapterTests(unittest.TestCase):
             adapter = adapter.bind_segment({"index": 0, "segment_id": "42", "text": "中文", "speech_file": str(path)})
             target = Path(folder) / "tts.wav"
             asyncio.run(adapter.synthesize("中文", "", str(target)))
-            report = json.loads(Path(str(target) + ".boundaries.json").read_text(encoding="utf-8"))
+            report = json.loads(read_text(str(target) + ".boundaries.json"))
             self.assertEqual(report["words"][0]["text"], "中文")
 
     def test_large_constructor_configuration_can_be_read_from_stdin(self):

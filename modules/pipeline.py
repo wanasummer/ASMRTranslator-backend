@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .io import intermediate_dir, open_log, write_json, write_text
+from .io import intermediate_dir
+from .storage import DatabaseLog, save_json, save_text
+from .storage import address, contains, read_text, document_digest, delete_document
 from .pipeline_logger import PipelineTee, print_progress
 from .vtt_parser import parse_vtt
 from .audio_splitter import get_audio_duration, split_audio
@@ -33,11 +35,11 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     from .arrangement_audio import create_arrangement_audio_adapter, write_arrangement_result
     work = Path(payload["workDir"])
     output = work / "arrangement/runs" / uuid4().hex
-    log_path = output / "arrangement.log"
-    with open_log(str(log_path)) as log:
+    log_path = address(output / "arrangement.log").reference
+    with DatabaseLog(str(log_path)) as log:
         with redirect_stdout(PipelineTee(sys.stdout, log)):
             print("[arrangement] 开始编排任务，使用已保存配置快照")
-            _required_stage("OUTPUT_WRITE_DENIED", write_json, str(output / "input.json"), payload["state"])
+            _required_stage("OUTPUT_WRITE_DENIED", save_json, str(output / "input.json"), payload["state"])
             print_progress("prepare", "读取编排配置与缓存", 0, 1)
             plan = _required_stage("AUDIO_DSP_FAILED", prepare_arrangement_plan,
                                    work, Path(payload["audioPath"]), payload["state"],
@@ -48,6 +50,8 @@ def run_arrangement_pipeline(payload: dict) -> dict:
             files = _required_stage("OUTPUT_WRITE_DENIED", write_arrangement_result, result, output, payload["state"])
             print(f"[arrangement] 重新编排完成：{files['output_mp3']}")
             print_progress("concat", "编排完成", 1, 1)
+    from .run_results import record_arrangement_run
+    _required_stage("OUTPUT_WRITE_DENIED", record_arrangement_run, work, output, payload["state"], files)
     return {**files, "log_path": str(log_path)}
 
 
@@ -71,28 +75,15 @@ def _required_stage(code: str, operation, *args, **kwargs):
 
 
 def _clean_previous_run(output_dir: str) -> int:
-    """Remove final outputs while preserving resumable stage artifacts.
-
-    Intermediate ASR, split, TTS, and audio-build directories intentionally
-    survive a retry. Their current cache keys are positional; invalidation for
-    changed source audio or synthesis settings is deferred until the cache
-    contract carries content/configuration fingerprints.
-
-    Returns the number of removed entries (0 when the directory was already clean).
-    """
+    """Invalidate published documents and audio, preserving content-addressed caches."""
+    for name in ("debug/_parsed_vtt.json", "llm_subtitles/final.vtt", "debug/high_quality_export.json"):
+        delete_document(Path(output_dir) / name)
     removed = 0
-    stale_files = ["_parsed_vtt.json", "output.wav", "output.mp3", "llm_subtitles/final.vtt",
-                   "debug/high_quality_export.json"]
-    stale_files.extend(
-        entry for entry in os.listdir(output_dir)
-        if re.fullmatch(r"pipeline_\d{8}_\d{6}\.log", entry)
-    )
-    for stale in stale_files:
-        try:
-            os.remove(os.path.join(output_dir, stale))
+    for name in ("output.wav", "output.mp3"):
+        path = Path(output_dir) / name
+        if path.is_file():
+            path.unlink()
             removed += 1
-        except OSError:
-            pass
     return removed
 
 
@@ -132,16 +123,18 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
     language = "zh" if configured.startswith("zh") else "ja"
     filename = "raw.vtt" if language == "zh" else "cleaned.vtt"
     path = os.path.join(output_dir, "asr_subtitles", filename)
-    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+    if not contains(path):
         return None
     record = None
     if expected_key:
-        from .task_cache import JsonResultCache, file_digest
-        record = JsonResultCache(os.path.join(output_dir, "asr_stage_results")).load(expected_key)
-        if not record or record.get("sha256") != file_digest(path):
+        from .task_cache import SqliteResultCache
+        record = SqliteResultCache(output_dir, "asr_stage_results").load(expected_key)
+        if not record or record.get("sha256") != document_digest(path):
             return None
     try:
-        blocks = parse_vtt(path)
+        from .subtitles.vtt_adapter import VTTAdapter
+        from .vtt_parser import VTTBlock
+        blocks = [VTTBlock.from_subtitle_block(block) for block in VTTAdapter().parse_text(read_text(path)).blocks]
     except (OSError, ValueError):
         return None
     if not blocks:
@@ -207,19 +200,20 @@ def _format_vtt_timestamp(ms: int) -> str:
 
 
 def _write_optimized_subtitles(output_dir: str, blocks) -> str:
-    """Write the (LLM-optimized) blocks as a standalone WebVTT file.
+    """Persist an optimized WebVTT document for inspection.
 
-    The file lands under ``output_dir/llm_subtitles/optimized.vtt`` so it never
-    collides with the pipeline's own artifacts. Speaker prefixes and any English
+    The logical key ``llm_subtitles/optimized.vtt`` is scoped to this asset. Speaker prefixes and any English
     emotion tags inside ``block.text`` are preserved as-is (tags are only
     stripped at TTS synthesis time, not here). Blocks flagged ``skip_tts``
     (interjection fragments whose translation TTS is skipped) get the marker
     ``【已跳过翻译】`` appended so they are identifiable at a glance.
 
-    Returns the absolute path of the written file.
+    Returns a SQLite document reference.
     """
+    from .storage import initialize_project
+    initialize_project(output_dir)
     path = os.path.join(
-        intermediate_dir(output_dir, "llm_subtitles"), "optimized.vtt"
+        os.path.join(output_dir, "llm_subtitles"), "optimized.vtt"
     )
     lines = ["WEBVTT", ""]
     for b in blocks:
@@ -234,18 +228,19 @@ def _write_optimized_subtitles(output_dir: str, blocks) -> str:
             text = f"{text}【已跳过翻译】"
         lines.append(text)
         lines.append("")
-    write_text(path, "\n".join(lines))
-    return path
+    return save_text(path, "\n".join(lines))
 
 
 def _write_asr_subtitles(output_dir: str, blocks) -> str:
-    """Write the raw ASR-generated blocks as a standalone WebVTT file.
+    """Persist raw ASR-generated blocks as an inspectable WebVTT document.
 
-    Lands under ``output_dir/asr_subtitles/raw.vtt``. Native speaker labels
+    Uses the asset-scoped logical key ``asr_subtitles/raw.vtt``. Native speaker labels
     are retained as prefixes so exports and cache reloads keep diarization.
     """
+    from .storage import initialize_project
+    initialize_project(output_dir)
     path = os.path.join(
-        intermediate_dir(output_dir, "asr_subtitles"), "raw.vtt"
+        os.path.join(output_dir, "asr_subtitles"), "raw.vtt"
     )
     lines = ["WEBVTT", ""]
     for b in blocks:
@@ -255,8 +250,7 @@ def _write_asr_subtitles(output_dir: str, blocks) -> str:
         )
         lines.append(f"{b.speaker}：{b.text or ''}" if b.speaker else b.text or "")
         lines.append("")
-    write_text(path, "\n".join(lines))
-    return path
+    return save_text(path, "\n".join(lines))
 
 
 def _serialize(regions):
@@ -273,16 +267,18 @@ def write_vad_output(output_dir: str, raw_regions, final_slices, cfg: dict) -> s
     failed ASR run can be inspected without re-running the detector. Returns
     the ``vad_output`` directory path that was written.
     """
-    dir_path = intermediate_dir(output_dir, "vad_output")
-    write_json(
+    from .storage import initialize_project
+    initialize_project(output_dir)
+    dir_path = os.path.join(output_dir, "vad_output")
+    save_json(
         os.path.join(dir_path, "raw_regions.json"),
         {"count": len(raw_regions), "regions": _serialize(raw_regions)},
     )
-    write_json(
+    save_json(
         os.path.join(dir_path, "final_slices.json"),
         {"count": len(final_slices), "slices": _serialize(final_slices)},
     )
-    write_json(
+    save_json(
         os.path.join(dir_path, "config.json"),
         {"vad_config": cfg},
     )
@@ -428,10 +424,15 @@ def run_pipeline(
     detect_summary = None
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    target = address(Path(output_dir) / "run")
+    with target.store.connect():
+        pass
     resume_cache_present = any(
         os.path.isdir(os.path.join(output_dir, name))
         for name in ("asr_subtitles", "chunk_0")
     )
+    from .run_results import record_run
+    record_run(output_dir, "running", audio_path)
     cleaned_count = _clean_previous_run(output_dir)
     start_time = time.time()
 
@@ -447,8 +448,8 @@ def run_pipeline(
     # Development and packaged runs use the same artifact layout. Keeping the
     # run log beside the audio's other outputs also isolates concurrent tasks.
     log_filename = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_path = Path(output_dir) / log_filename
-    log_fp = open_log(log_path, encoding="utf-8")
+    log_path = address(Path(output_dir) / log_filename).reference
+    log_fp = DatabaseLog(log_path, encoding="utf-8")
     _original_stdout = sys.stdout
     tee = PipelineTee(_original_stdout, log_fp)
     sys.stdout = tee
@@ -489,7 +490,7 @@ def run_pipeline(
         asr_output_language = None
         asr_preserve_timeline = False
 
-        from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+        from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
         vad_cfg = resolve_vad_config({
             "enabled": vad_enabled,
             "backend": vad_backend,
@@ -518,13 +519,16 @@ def run_pipeline(
             print_progress("asr", "正在恢复字幕缓存", 0, 1)
             blocks, asr_output_language, cached_asr_path = cached_asr
             if asr_cache_key:
-                cached_metadata = JsonResultCache(os.path.join(output_dir, "asr_stage_results")).load(asr_cache_key) or {}
+                cached_metadata = SqliteResultCache(output_dir, "asr_stage_results").load(asr_cache_key) or {}
                 asr_preserve_timeline = cached_metadata.get("preserve_source_timeline") is True
             print(f"       [cached-asr] 复用 {len(blocks)} 个字幕块: {cached_asr_path}")
             print_progress("asr", "正在恢复字幕缓存", 1, 1)
         elif vtt_path:
             print_progress("parsing", "正在解析字幕", 0, 1)
+            from .subtitles.artifacts import save_imported_subtitles, save_subtitle_source
+            _required_stage("OUTPUT_WRITE_DENIED", save_subtitle_source, output_dir, vtt_path)
             blocks = parse_vtt(vtt_path)
+            _required_stage("OUTPUT_WRITE_DENIED", save_imported_subtitles, output_dir, blocks)
             print(f"       Found {len(blocks)} subtitle blocks")
             print_progress("parsing", "正在解析字幕", 1, 1)
         else:
@@ -628,10 +632,10 @@ def run_pipeline(
                 asr_preserve_timeline = asr_preserve_timeline or detect_stage is not None
                 filename = "raw.vtt" if asr_output_language == "zh" else "cleaned.vtt"
                 cached_path = os.path.join(output_dir, "asr_subtitles", filename)
-                if os.path.isfile(cached_path):
-                    JsonResultCache(os.path.join(output_dir, "asr_stage_results")).save(
+                if contains(cached_path):
+                    SqliteResultCache(output_dir, "asr_stage_results").save(
                         asr_cache_key, {
-                            "sha256": file_digest(cached_path),
+                            "sha256": document_digest(cached_path),
                             "preserve_source_timeline": asr_preserve_timeline,
                             "block_lineage": [
                                 _serialize_parsed_vtt_block(b) for b in blocks
@@ -700,8 +704,8 @@ def run_pipeline(
         if skipped:
             print(f"       [skip-tts] {skipped} 个语气词/短句片段将跳过翻译 TTS（保留原声）")
 
-        _required_stage("OUTPUT_WRITE_DENIED", write_json,
-            os.path.join(intermediate_dir(output_dir, "debug"), "_parsed_vtt.json"),
+        _required_stage("OUTPUT_WRITE_DENIED", save_json,
+            os.path.join(output_dir, "debug", "_parsed_vtt.json"),
             [_serialize_parsed_vtt_block(b) for b in blocks])
 
         # Export the optimized subtitles as a standalone WebVTT file (only when
@@ -850,7 +854,7 @@ def run_pipeline(
             "AUDIO_METADATA_FAILED", create_metadata_reader().read, audio_path)
         metadata_report = _required_stage(
             "AUDIO_METADATA_FAILED", write_audio_metadata, source_metadata,
-            (mp3_output, final_output), intermediate_dir(output_dir, "debug"))
+            (mp3_output, final_output), os.path.join(output_dir, "debug"))
         file_size = os.path.getsize(mp3_output) / (1024 * 1024)
         elapsed = time.time() - start_time
 
@@ -900,6 +904,7 @@ def run_pipeline(
     except Exception as raw_error:
         import traceback
         from .error import unexpected_error
+        record_run(output_dir, "failed", audio_path)
         error = unexpected_error(raw_error)
         error.log_path = str(log_path)
         print(f"\n!!! Pipeline failed:\n{traceback.format_exc()}")

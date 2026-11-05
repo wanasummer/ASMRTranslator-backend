@@ -11,7 +11,7 @@ from modules.asr_engine import _transcribe_chunks
 from modules.error import ASRError, LLMError, PipelineError, TTSError
 from modules.llm import LLMConfig
 from modules.llm.factory import create_capabilities
-from modules.task_cache import JsonResultCache
+from modules.task_cache import SqliteResultCache
 from modules.tts_engine import generate_tts
 from modules.vtt_parser import VTTBlock
 
@@ -58,7 +58,7 @@ class SliceResumeTest(unittest.TestCase):
                 with open(path, "wb") as target:
                     target.write(bytes([i]))
                 chunks.append(AudioChunk(str(i), i, i + 1, path))
-            cache = JsonResultCache(os.path.join(directory, "results"))
+            cache = SqliteResultCache(os.path.join(directory, "results"))
             adapter = Adapter()
             progress = []
             with self.assertRaises(PipelineError):

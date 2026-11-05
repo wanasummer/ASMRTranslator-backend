@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """Qwen policy isolation and common downstream handoff contracts."""
 
 from dataclasses import replace
@@ -92,7 +93,7 @@ class QwenPipelineIsolationTests(unittest.TestCase):
         ]}, 4000))
         with tempfile.TemporaryDirectory() as directory:
             result = stage.run(DetectStageInput((original,)), directory)
-            audit = json.loads((Path(directory) / "detect_output/sentence_alignment.json").read_text(encoding="utf-8"))
+            audit = json.loads(read_text(Path(directory) / "detect_output/sentence_alignment.json"))
         self.assertIn("endpoint", audit["config"])
         self.assertNotIn("atom_detector", audit["config"])
         self.assertNotIn("duration_estimator", audit["config"])

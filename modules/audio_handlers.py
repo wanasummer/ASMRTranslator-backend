@@ -31,7 +31,8 @@ from concurrent.futures import ThreadPoolExecutor
 from .phantom_engine import apply_phantom_dsp, get_ir_path
 from .tts_artifact import detect_tts_artifact
 from .tts_engine import get_tts_adapter, prepare_text_for_synthesis
-from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+from .storage import move_document
+from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
 
 
 class AudioHandler(ABC):
@@ -81,7 +82,7 @@ class TTSArtifactHandler(AudioHandler):
 
     def process(self, segments, output_dir, max_workers=4):
         counts = {}
-        cache = JsonResultCache(os.path.join(output_dir, "artifact_results"))
+        cache = SqliteResultCache(output_dir, "artifact_results")
 
         def _one(seg):
             tts_file = seg.get("tts_file")
@@ -128,11 +129,7 @@ class TTSArtifactHandler(AudioHandler):
                         adapter.synthesize_sync(text, voice, pending,
                                                 rate=self.rate, pitch=self.pitch)
                         os.replace(pending, regenerated)
-                        sidecar = pending + ".boundaries.json"
-                        if os.path.isfile(sidecar):
-                            os.replace(sidecar, regenerated + ".boundaries.json")
-                        elif os.path.isfile(regenerated + ".boundaries.json"):
-                            os.remove(regenerated + ".boundaries.json")
+                        move_document(pending + ".boundaries.json", regenerated + ".boundaries.json")
                 except Exception as error:
                     cache.fail(key, error)
                     raise RuntimeError(f"seg {seg['index']} artifact regeneration failed: {error}") from error

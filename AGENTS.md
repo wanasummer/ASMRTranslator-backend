@@ -67,8 +67,14 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
 
 ## Diagnostics and Failure Behavior
 
-- Save raw inputs before transforming them. Save cleaned/optimized artifacts next
-  to a structured JSON audit report when a transformation can discard information.
+- Persist project-generated non-audio data in one project SQLite database using
+  `modules/storage.py` and the shared `storage_schema.sql`. Audio remains on disk.
+  Do not introduce JSON/VTT/log sidecars, legacy-file fallbacks, or SQL in pipeline
+  orchestration. Include the SQL resource explicitly in the Nuitka package.
+
+- Save raw inputs before transforming them. Save cleaned/optimized artifacts and
+  structured audit documents in the same project database when a transformation
+  can discard information.
 - Log counts, stage names, and artifact paths; never log secrets or credentials.
 - Make fallback and degradation behavior explicit rather than silently changing a
   stage's contract.

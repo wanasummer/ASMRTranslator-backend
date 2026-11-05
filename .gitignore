@@ -37,3 +37,4 @@ build_nuitka
 !.env.example
 output/
 out/
+generated/

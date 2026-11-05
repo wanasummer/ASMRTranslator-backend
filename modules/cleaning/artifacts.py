@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from ..io import intermediate_dir, write_json, write_text
+from ..storage import save_json, save_text
 from .contracts import JapaneseCleaningResult
 
 
@@ -18,7 +18,9 @@ def _timestamp(ms: int) -> str:
 
 def write_cleaning_artifacts(result: JapaneseCleaningResult, output_dir: str) -> dict[str, str]:
     """Write cleaned VTT and JSON audit report; return their paths."""
-    directory = intermediate_dir(output_dir, "asr_subtitles")
+    from ..storage import initialize_project
+    initialize_project(output_dir)
+    directory = os.path.join(output_dir, "asr_subtitles")
     vtt_path = os.path.join(directory, "cleaned.vtt")
     report_path = os.path.join(directory, "clean_report.json")
 
@@ -30,6 +32,6 @@ def write_cleaning_artifacts(result: JapaneseCleaningResult, output_dir: str) ->
             f"{block.speaker}：{block.text or ''}" if block.speaker else block.text or "",
             "",
         ])
-    write_text(vtt_path, "\n".join(lines))
-    write_json(report_path, result.as_dict())
+    vtt_path = save_text(vtt_path, "\n".join(lines))
+    report_path = save_json(report_path, result.as_dict())
     return {"vtt": vtt_path, "report": report_path}

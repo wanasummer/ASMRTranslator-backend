@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """Subtitle-only runs preserve cues and stop before every audio/TTS stage."""
 from contextlib import ExitStack, redirect_stdout
 from io import StringIO
@@ -8,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from modules.pipeline import run_pipeline
+from test_run_results import latest
 
 
 class SubtitlesOnlyPipelineTest(unittest.TestCase):
@@ -21,11 +23,13 @@ class SubtitlesOnlyPipelineTest(unittest.TestCase):
             output = root / "work"
             (output / "llm_subtitles").mkdir(parents=True)
             final = output / "llm_subtitles" / "final.vtt"
-            final.write_text("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n旧字幕\n", encoding="utf-8")
+            initialize_project(output)
+            save_text(final, "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n旧字幕\n", encoding="utf-8")
             with redirect_stdout(StringIO()), self.assertRaises(PipelineError) as error:
                 run_pipeline(str(source), str(vtt), str(output), tts_backend="subtitles-only")
             self.assertEqual(error.exception.descriptor.code, "SUBTITLE_FINAL_EMPTY")
-            self.assertFalse(final.exists())
+            self.assertFalse(contains(final))
+            self.assertEqual(read_bytes(output / "inputs/subtitle-source"), vtt.read_bytes())
             self.assertFalse((root / "run-result.json").exists())
 
     def test_only_subtitle_media_is_produced_and_old_audio_is_removed(self):
@@ -55,14 +59,14 @@ class SubtitlesOnlyPipelineTest(unittest.TestCase):
                 function.assert_not_called()
             self.assertNotIn("output_mp3", result)
             self.assertNotIn("output_wav", result)
-            content = Path(result["final_vtt"]).read_text(encoding="utf-8")
+            content = read_text(result["final_vtt"])
             self.assertIn("嗯", content)
             self.assertIn("好", content)
             self.assertIn("00:00:00.010 --> 00:00:00.500", content)
             media = [path.suffix for path in output.rglob("*") if path.is_file()
                      and path.suffix in {".mp3", ".wav", ".vtt"}]
-            self.assertEqual(media, [".vtt"])
-            record = json.loads(Path(result["run_result"]).read_text(encoding="utf-8"))["runs"]["work"]
+            self.assertEqual(media, [])
+            record = latest(output)
             self.assertEqual(record["status"], "succeeded")
             self.assertEqual(record["outputMode"], "subtitles-only")
             self.assertEqual(record["files"], {"finalVtt": "llm_subtitles/final.vtt"})

@@ -14,7 +14,8 @@ from typing import Optional
 from .tts import create_tts, EdgeTTSAdapter, TTSAdapter
 from .tts.models import TTSSegmentContext
 from .text_normalization import strip_emotion_tags
-from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+from .storage import move_document
+from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
 
 
 # Default voice mappings — per backend
@@ -182,7 +183,7 @@ async def _generate_one(
     tts_filename = f"tts_{idx:04d}{output_extension}"
     tts_path = os.path.join(output_dir, tts_filename)
 
-    cache = JsonResultCache(os.path.join(output_dir, "results"))
+    cache = SqliteResultCache(output_dir, "results")
     text = prepare_text_for_synthesis(adapter, seg["text"])
     segment_inputs = public_settings(
         adapter.cache_inputs() if callable(getattr(type(adapter), "cache_inputs", None)) else {}
@@ -214,11 +215,7 @@ async def _generate_one(
                     from .error import TtsError, descriptor
                     raise TtsError(descriptor("TTS_OUTPUT_INVALID"))
                 os.replace(pending, tts_path)
-                sidecar = pending + ".boundaries.json"
-                if os.path.isfile(sidecar):
-                    os.replace(sidecar, tts_path + ".boundaries.json")
-                elif os.path.isfile(tts_path + ".boundaries.json"):
-                    os.remove(tts_path + ".boundaries.json")
+                move_document(pending + ".boundaries.json", tts_path + ".boundaries.json")
             cache.save(key, {"path": tts_path, "sha256": file_digest(tts_path),
                              "segment_inputs": segment_inputs})
         except Exception as error:

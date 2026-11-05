@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 import asyncio
 import json
 import tempfile
@@ -23,20 +24,20 @@ class ArrangementTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.work = Path(self.temporary.name)
+        initialize_project(self.work)
         (self.work / "debug").mkdir()
         self.rows = [{"index": 7, "start_ms": 0, "end_ms": 1000, "text": "请听我说一句话", "source_text": "聞いてください"},
                      {"index": 13, "start_ms": 2000, "end_ms": 3000, "text": "我们慢慢说话吧", "source_text": "ゆっくり話しましょう"}]
-        (self.work / "debug/_parsed_vtt.json").write_text(json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
+        save_text(self.work / "debug/_parsed_vtt.json", json.dumps(self.rows, ensure_ascii=False))
         self.state = initial_state(self.work)
 
     def test_default_interval_uses_completed_pipeline_tempo(self):
-        (self.work / "pipeline_20260101_010101.log").write_text(
-            "[budget] seg 13: 人声 2000ms > 预算 1000ms → 加速1.25x 至 1000ms\n"
-            "Pipeline complete!\n", encoding="utf-8")
-        self.assertEqual(pipeline_tts_rates(self.work), {13: 1.25})
+        save_text(self.work / "pipeline_20260101_010101.log", "[budget] seg 13: 人声 2000ms > 预算 1000ms → 加速1.25x 至 1000ms\n"
+            "Pipeline complete!\n")
+        self.assertEqual(pipeline_tts_rates(self.work), {})
         cache = self.work / "chunk_0/02_tts"
         cache.mkdir(parents=True)
-        (cache / "tts_tempo_0013.json").write_text('{"rate": 1.2}', encoding="utf-8")
+        save_text(cache / "tts_tempo_0013.json", '{"rate": 1.2}')
         self.assertEqual(pipeline_tts_rates(self.work), {13: 1.2})
         (cache / "tts_0000.wav").touch()
         (cache / "tts_0001.wav").touch()
@@ -115,7 +116,7 @@ class ArrangementTests(unittest.TestCase):
             run_editor_request({"workDir": str(self.work), "action": "save", "state": self.state})
         synth.assert_not_called()
         self.assertEqual(load_state(self.work), self.state)
-        self.assertEqual(json.loads((self.work / "debug/_parsed_vtt.json").read_text(encoding="utf-8")), self.rows)
+        self.assertEqual(json.loads(read_text(self.work / "debug/_parsed_vtt.json")), self.rows)
 
     def test_deleted_fragment_stays_in_draft_but_is_omitted_from_audio_plan(self):
         cache = self.work / "chunk_0/02_tts"
@@ -146,7 +147,7 @@ class ArrangementTests(unittest.TestCase):
         bad["segments"][1]["interval"] = None
         with self.assertRaises(ArrangementError):
             save_state(self.work, bad)
-        (self.work / "debug/_parsed_vtt.json").write_text("[]")
+        save_text(self.work / "debug/_parsed_vtt.json", "[]")
         with self.assertRaises(ArrangementError):
             save_state(self.work, self.state)
 
@@ -156,8 +157,7 @@ class ArrangementTests(unittest.TestCase):
         save_state(self.work, self.state)
         old_version = self.state["sourceVersion"]
         self.rows[0]["text"] = "重新生成的字幕"
-        (self.work / "debug/_parsed_vtt.json").write_text(
-            json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
+        save_text(self.work / "debug/_parsed_vtt.json", json.dumps(self.rows, ensure_ascii=False))
 
         result = run_editor_request({"workDir": str(self.work), "action": "load"})["state"]
         self.assertNotEqual(result["sourceVersion"], old_version)
@@ -165,38 +165,37 @@ class ArrangementTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["volume"], 1)
         self.assertIsNone(result["segments"][0]["interval"])
         draft_path = self.work / "arrangement/draft.json"
-        self.assertEqual(json.loads(draft_path.read_text(encoding="utf-8"))["sourceVersion"], old_version)
+        self.assertEqual(json.loads(read_text(draft_path))["sourceVersion"], old_version)
 
         save_state(self.work, result)
-        backups = list((self.work / "arrangement").glob("draft.stale.*.json"))
+        target = address(self.work / "arrangement/draft.json")
+        backups = [self.work / key for key in target.store.keys(target.scope, "arrangement/history/")]
         self.assertEqual(len(backups), 1)
-        self.assertEqual(json.loads(backups[0].read_text(encoding="utf-8"))["sourceVersion"], old_version)
+        self.assertEqual(json.loads(read_text(backups[0]))["sourceVersion"], old_version)
         self.assertEqual(load_state(self.work), result)
 
     def test_changed_segment_ids_start_fresh_without_overwriting_old_draft(self):
         self.state["segments"][0]["text"] = "保留在旧草稿中的字幕"
         save_state(self.work, self.state)
         self.rows[0]["index"] = 99
-        (self.work / "debug/_parsed_vtt.json").write_text(
-            json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
+        save_text(self.work / "debug/_parsed_vtt.json", json.dumps(self.rows, ensure_ascii=False))
 
         result = load_state(self.work)
         self.assertEqual(result["segments"][0]["index"], 99)
         self.assertEqual(result["segments"][0]["text"], self.rows[0]["text"])
-        self.assertEqual(json.loads((self.work / "arrangement/draft.json").read_text(encoding="utf-8"))["segments"][0]["text"], "保留在旧草稿中的字幕")
+        self.assertEqual(json.loads(read_text(self.work / "arrangement/draft.json"))["segments"][0]["text"], "保留在旧草稿中的字幕")
 
     def test_changed_timing_with_same_text_and_ids_does_not_inherit_intervals(self):
         self.state["segments"][0]["interval"] = {"start": 100, "end": 900}
         save_state(self.work, self.state)
-        original_draft = (self.work / "arrangement/draft.json").read_bytes()
+        original_draft = read_bytes(self.work / "arrangement/draft.json")
         self.rows[0].update(start_ms=500, end_ms=1500)
-        (self.work / "debug/_parsed_vtt.json").write_text(
-            json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
+        save_text(self.work / "debug/_parsed_vtt.json", json.dumps(self.rows, ensure_ascii=False))
 
         result = load_state(self.work)
         self.assertEqual(result, initial_state(self.work))
         self.assertIsNone(result["segments"][0]["interval"])
-        self.assertEqual((self.work / "arrangement/draft.json").read_bytes(), original_draft)
+        self.assertEqual(read_bytes(self.work / "arrangement/draft.json"), original_draft)
 
     def test_single_optimization_always_uses_current_japanese_and_does_not_mutate(self):
         optimizer = MagicMock()
@@ -242,7 +241,7 @@ class ArrangementTests(unittest.TestCase):
             result = run_editor_request(payload)
         self.assertEqual(result["edit"]["text"], "新的中文")
         self.assertEqual(load_state(self.work), self.state)
-        self.assertEqual(len(list((self.work / "arrangement/audit").glob("*.json"))), 2)
+        self.assertEqual(len(address(self.work / "arrangement/audit").store.keys("", "arrangement/audit/")), 2)
 
     def test_japanese_text_service_never_requests_chinese_translation(self):
         from modules.vtt_parser import VTTBlock
@@ -321,7 +320,8 @@ class ArrangementTests(unittest.TestCase):
             output = run_arrangement_pipeline(payload)
         adapter.render.assert_called_once_with(plan)
         self.assertIs(writer.call_args.args[0], result)
-        self.assertTrue(Path(output["log_path"]).is_file())
+        from modules.storage import read_log
+        self.assertIn("重新编排完成", read_log(output["log_path"]))
 
     def test_tts_readability_rules_are_shared_with_existing_optimization(self):
         for backend in ("edge-tts", "fish-audio", "minimax-tts"):
@@ -422,7 +422,7 @@ class ArrangementTests(unittest.TestCase):
         self.assertEqual(result.audio[7000:11000].rms, original.rms)
         with patch("pydub.AudioSegment.export"):
             output = write_arrangement_result(result, self.work / "export", {})
-        self.assertIn("00:00:00.000 --> 00:00:02.000", Path(output["final_vtt"]).read_text(encoding="utf-8"))
+        self.assertIn("00:00:00.000 --> 00:00:02.000", read_text(output["final_vtt"]))
 
     def test_last_voice_can_start_five_seconds_after_source_but_no_later(self):
         from array import array

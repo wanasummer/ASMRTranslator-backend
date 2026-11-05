@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional, Protocol
 
-from ..io import write_text
+from ..storage import save_text
 
 if TYPE_CHECKING:
     from ..audio_joiner import SegmentPlacement
@@ -84,7 +84,9 @@ def _timestamp(milliseconds: int) -> str:
 
 
 def write_final_vtt(cues: Iterable[FinalSubtitleCue], output_dir: str) -> str:
-    """Write UTF-8/LF WebVTT to ``llm_subtitles/final.vtt``."""
+    """Persist UTF-8/LF WebVTT and return its SQLite document reference."""
+    from ..storage import initialize_project
+    initialize_project(output_dir)
     cue_list = list(cues)
     if not cue_list:
         raise FinalSubtitleError("最终字幕没有可导出的有效 cue")
@@ -98,9 +100,4 @@ def write_final_vtt(cues: Iterable[FinalSubtitleCue], output_dir: str) -> str:
             text,
             "",
         ])
-    try:
-        write_text(str(path), "\n".join(lines), encoding="utf-8")
-    except OSError:
-        path.unlink(missing_ok=True)
-        raise
-    return str(path.resolve())
+    return save_text(str(path), "\n".join(lines), encoding="utf-8")

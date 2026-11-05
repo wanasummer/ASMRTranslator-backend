@@ -10,7 +10,7 @@ from .contracts import SubtitleStage
 def _create_llm_stage(config: dict, output_dir: str | None = None) -> SubtitleStage:
     settings = LLMConfig(**config)
     capabilities = create_capabilities(
-        settings, cache_dir=str(Path(output_dir) / "llm_results") if output_dir else None,
+        settings, cache_dir=output_dir,
     ) if is_configured(settings) else None
     return LLMSubtitleStage(settings, capabilities)
 

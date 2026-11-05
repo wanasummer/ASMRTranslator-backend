@@ -96,7 +96,8 @@ def build_error_report(
     log_path = getattr(error, "log_path", "")
     if log_path:
         try:
-            pipeline_log = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            from .storage import read_log
+            pipeline_log = read_log(log_path)
             if len(pipeline_log) > _MAX_PIPELINE_LOG_CHARS:
                 pipeline_log = pipeline_log[-_MAX_PIPELINE_LOG_CHARS:]
                 pipeline_log = "[earlier pipeline log omitted]\n" + pipeline_log

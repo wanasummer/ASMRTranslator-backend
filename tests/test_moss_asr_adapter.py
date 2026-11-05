@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 from tests.llm_support import subtitle_stage_factory
 import unittest
 from contextlib import redirect_stdout
@@ -83,10 +84,10 @@ class MossPipelineTests(unittest.TestCase):
                         asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
                         japanese_cleaner="regex-only", detect_enabled=True, llm_kwargs={"provider": "test"})
                     self.assertEqual([block.speaker for block in result["blocks"]], ["S01", "S02"])
-                    self.assertIn("S01：こんにちは。", Path(result["final_vtt"]).read_text(encoding="utf-8"))
+                    self.assertIn("S01：こんにちは。", read_text(result["final_vtt"]))
             vad.assert_not_called()
             detect.assert_not_called()
             client.request.assert_called_once()
             self.assertEqual(preserved, [True, True])
-            raw = json.loads((output / "asr_subtitles/raw_response.json").read_text(encoding="utf-8"))
+            raw = json.loads(read_text(output / "asr_subtitles/raw_response.json"))
             self.assertEqual(raw, payload())

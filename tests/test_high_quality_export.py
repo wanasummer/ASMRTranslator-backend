@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 import io
 import json
 from pathlib import Path
@@ -15,6 +16,23 @@ from modules.mode_builders import create_segment_builder
 
 
 class RecipeTests(unittest.TestCase):
+    def test_moved_project_rebinds_internal_source_and_keeps_verified_tts(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "before"
+            work = project / "generated/assets/track"
+            work.mkdir(parents=True)
+            source = project / "source.wav"
+            tts = work / "voice.wav"
+            source.write_bytes(b"source")
+            tts.write_bytes(b"voice")
+            write_export_recipe(str(source), [{"index":0,"start_ms":0,"end_ms":1000,"tts_file":str(tts)}], {}, str(work), 0, 0)
+            moved = Path(directory) / "after"
+            shutil.move(str(project),str(moved))
+            recipe, restored = load_recipe(str(moved/"generated/assets/track/debug/high_quality_export.json"))
+            self.assertEqual(restored, moved/"generated/assets/track")
+            self.assertEqual(recipe["source"]["path"], str(moved/"source.wav"))
+
     def test_recipe_is_independent_snapshot_with_verified_tts_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,9 +61,9 @@ class RecipeTests(unittest.TestCase):
             with self.assertRaises(HighQualityExportError):
                 load_recipe(path)
             source.write_bytes(b"original")
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            data = json.loads(read_text(path))
             data["inputs"] = {"../outside.wav": "fake"}
-            Path(path).write_text(json.dumps(data), encoding="utf-8")
+            save_text(path, json.dumps(data))
             with self.assertRaises(HighQualityExportError):
                 load_recipe(path)
 

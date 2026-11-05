@@ -40,10 +40,11 @@ from .asr.segmentation import (
     to_absolute,
 )
 from .error import ASRError
-from .io import intermediate_dir, write_json
+from .io import intermediate_dir
+from .storage import save_json
 from .pipeline_logger import print_progress
 from .vtt_parser import VTTBlock
-from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
 
 # Default backend — the only ASR engine shipped.
 _DEFAULT_BACKEND = "fish-asr"
@@ -275,8 +276,8 @@ def _write_debug_json(output_dir: str, chunks, pairs, abs_segs, sentences) -> No
             for s in sentences
         ],
     }
-    write_json(
-        os.path.join(intermediate_dir(output_dir, "asr_subtitles"),
+    save_json(
+        os.path.join(os.path.join(output_dir, "asr_subtitles"),
                      "asr_debug.json"),
         debug,
     )
@@ -330,7 +331,7 @@ def process_audio(
     t1 = time.perf_counter()
     pairs = asyncio.run(_transcribe_chunks(
         chunks, adapter, max_workers, _progress,
-        JsonResultCache(os.path.join(output_dir, "asr_results")),
+        SqliteResultCache(output_dir, "asr_results"),
         _build_adapter_kwargs(asr_kwargs, cfg, language),
     ))
     print(f"       [asr] 语音识别完成：{len(pairs)}/{len(chunks)}，"

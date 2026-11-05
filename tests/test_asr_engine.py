@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import read_text, read_json, contains, address
 """Tests for modules.asr_engine (transcribe_slices orchestration).
 
 Run from the project root:  python -m unittest tests.test_asr_engine
@@ -323,8 +325,8 @@ class TranscribeSlicesTest(unittest.TestCase):
             self._run([SpeechRegion(0.0, 15.0)], [_chunk(0, 0.0, 15.0, "c0.wav")],
                       adapter, {"api_key": "k", "debug": True}, outdir=tmp)
             dbg_path = os.path.join(tmp, "asr_subtitles", "asr_debug.json")
-            self.assertTrue(os.path.exists(dbg_path))
-            with open(dbg_path, encoding="utf-8") as f:
+            self.assertTrue(contains(dbg_path))
+            with StringIO(read_text(dbg_path)) as f:
                 data = json.load(f)
             self.assertEqual(len(data["final_segments"]), 1)
             self.assertEqual(data["final_segments"][0]["text"], "こんにちは")

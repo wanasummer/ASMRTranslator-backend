@@ -8,7 +8,7 @@ from typing import Optional
 import httpx
 from ..error import LLMError
 from ..network import NetworkPolicy, async_client
-from ..task_cache import JsonResultCache, cache_key, public_settings
+from ..task_cache import SqliteResultCache, cache_key, public_settings
 from .config import LLMConfig, LLMConnectionConfig
 from .providers import create_provider
 from .artifacts import RequestArtifactWriter
@@ -22,7 +22,7 @@ class LLMRuntime:
         self.client_factory = client_factory
         self.sleep = sleep
         self._network_policy = NetworkPolicy()
-        self.cache = cache if cache is not None else (JsonResultCache(cache_dir) if cache_dir else None)
+        self.cache = cache if cache is not None else (SqliteResultCache(cache_dir, "llm_results") if cache_dir else None)
         self.artifacts = RequestArtifactWriter(cache_dir, secret=cfg.api_key)
 
     @staticmethod

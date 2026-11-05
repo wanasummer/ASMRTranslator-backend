@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 from tests.llm_support import subtitle_stage_factory
 """Japanese sentence detection, acoustic alignment, and pipeline handoff."""
 
@@ -331,8 +332,7 @@ class DetectStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = stage.run(DetectStageInput((source,)), directory)
             audit = json.loads(
-                (Path(directory) / "detect_output" / "sentence_alignment.json")
-                .read_text(encoding="utf-8")
+                read_text(Path(directory) / "detect_output" / "sentence_alignment.json")
             )
         self.assertEqual(source.text, "今日は休みです。明日は仕事です。")
         self.assertEqual([block.text for block in result.blocks], [

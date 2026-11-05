@@ -70,8 +70,10 @@ class EnhanceTest(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'pipeline.log'
-            path.write_text(log, encoding='utf-8')
-            error.log_path = str(path)
+            from modules.storage import DatabaseLog
+            with DatabaseLog(path) as stream:
+                stream.write(log)
+                error.log_path = stream.name
             report = build_error_report(error, '', environ={})
         self.assertIn(marker, report)
         self.assertIn('request-123', report)

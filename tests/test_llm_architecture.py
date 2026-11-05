@@ -1,3 +1,4 @@
+from modules.storage import address, read_text
 """LLM extension boundaries, persistence and immutable subtitle handoff."""
 import asyncio
 import ast
@@ -59,14 +60,15 @@ class LLMArchitectureTests(unittest.TestCase):
             with patch('modules.llm.runtime.httpx', FakeHttpx([response])):
                 with self.assertRaises(LLMError):
                     asyncio.run(runtime.complete('提示词', '原文'))
-            files = list((Path(directory) / 'requests').glob('*.json'))
+            store = address(Path(directory) / 'storage').store
+            files = [Path(directory) / key for key in store.keys('', 'llm_results/requests/')]
             self.assertEqual(len(files), 2)
             for path in files:
-                text = path.read_text(encoding='utf-8')
+                text = read_text(path)
                 self.assertNotIn(secret, text)
                 json.loads(text)
             raw = next(path for path in files if path.name.endswith('.response.json'))
-            self.assertIn('原始响应', raw.read_text(encoding='utf-8'))
+            self.assertIn('原始响应', read_text(raw))
 
     def test_translation_cache_includes_summary_context(self):
         with tempfile.TemporaryDirectory() as directory:

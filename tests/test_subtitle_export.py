@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import read_text, read_json, contains, address
 """Tests for pipeline's optimized-subtitle WebVTT export.
 
 Run from the project root:  python -m unittest tests.test_subtitle_export
@@ -39,9 +41,10 @@ class ExportTest(unittest.TestCase):
         blocks = _blocks("[whispering] 你好世界。", "好的，我知道了。")
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_optimized_subtitles(tmp, blocks)
-            self.assertTrue(path.endswith(os.path.join("llm_subtitles", "optimized.vtt")))
-            self.assertTrue(os.path.exists(path))
-            with open(path, "r", encoding="utf-8") as f:
+            self.assertTrue(path.startswith("sqlite:"))
+            self.assertEqual(address(path).key, "llm_subtitles/optimized.vtt")
+            self.assertTrue(contains(path))
+            with StringIO(read_text(path)) as f:
                 content = f.read()
 
         self.assertTrue(content.startswith("WEBVTT"))
@@ -54,7 +57,7 @@ class ExportTest(unittest.TestCase):
         blocks = _blocks("", "只有第二行有字")
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_optimized_subtitles(tmp, blocks)
-            with open(path, "r", encoding="utf-8") as f:
+            with StringIO(read_text(path)) as f:
                 content = f.read()
         self.assertIn("00:00:00.000 --> 00:00:00.500\n遥：", content)
         self.assertIn("只有第二行有字", content)
@@ -62,7 +65,7 @@ class ExportTest(unittest.TestCase):
     def test_no_blocks_writes_header_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_optimized_subtitles(tmp, [])
-            with open(path, "r", encoding="utf-8") as f:
+            with StringIO(read_text(path)) as f:
                 content = f.read()
         self.assertEqual(content, "WEBVTT\n")
 
@@ -72,7 +75,7 @@ class ExportTest(unittest.TestCase):
         blocks[2].skip_tts = True
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_optimized_subtitles(tmp, blocks)
-            with open(path, "r", encoding="utf-8") as f:
+            with StringIO(read_text(path)) as f:
                 content = f.read()
         # Skipped blocks carry the marker; normal blocks are untouched.
         self.assertIn("遥：嗯【已跳过翻译】", content)

@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 from .arrangement_contracts import ArrangementError, ArrangedClip, ArrangementPlan, ArrangementAudioResult, ArrangementAudioAdapter
 from .audio_joiner import get_ffmpeg_path
-from .io import write_json, write_text
+from .storage import save_json, save_text
 
 
 def perceived_db(audio) -> float | None:
@@ -105,17 +105,19 @@ def create_arrangement_audio_adapter(name: str = "pydub") -> ArrangementAudioAda
 
 def write_arrangement_result(result: ArrangementAudioResult, directory: Path, snapshot: dict) -> dict:
     """Persist final artifacts separately from audio transformation and orchestration."""
+    from .storage import initialize_project
+    initialize_project(directory)
     directory.mkdir(parents=True, exist_ok=True)
     wav, mp3 = directory / "output.wav", directory / "output.mp3"
     result.audio.export(wav, format="wav")
     result.audio.export(mp3, format="mp3", bitrate="192k")
-    write_json(str(directory / "snapshot.json"), snapshot)
-    write_json(str(directory / "audit.json"), [{"index": c.index, "path": str(c.path), "start_ms": c.start_ms,
+    save_json(str(directory / "snapshot.json"), snapshot)
+    save_json(str(directory / "audit.json"), [{"index": c.index, "path": str(c.path), "start_ms": c.start_ms,
                                                "end_ms": c.end_ms, "output_start_ms": c.start_ms + result.origin_shift_ms,
                                                "output_end_ms": c.end_ms + result.origin_shift_ms,
                                                "volume": c.volume} for c in result.clips])
     def stamp(ms):
         return f"{ms // 3600000:02}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}"
     vtt = "WEBVTT\n\n" + "\n\n".join(f"{clip.index}\n{stamp(clip.start_ms + result.origin_shift_ms)} --> {stamp(clip.end_ms + result.origin_shift_ms)}\n{clip.text}" for clip in result.clips) + "\n"
-    path = write_text(str(directory / "final.vtt"), vtt)
+    path = save_text(str(directory / "final.vtt"), vtt)
     return {"output_wav": str(wav), "output_mp3": str(mp3), "final_vtt": path}

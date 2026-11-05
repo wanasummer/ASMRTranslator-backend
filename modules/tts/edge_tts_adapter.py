@@ -32,6 +32,7 @@ from edge_tts.exceptions import NoAudioReceived, UnexpectedResponse, UnknownResp
 
 from ..error import TTSError, descriptor
 from ..io import open_write
+
 from .base import TTSAdapter
 from .models import VoiceInfo
 
@@ -196,10 +197,8 @@ class EdgeTTSAdapter(TTSAdapter):
         if audio_bytes <= 0:
             raise NoAudioReceived("No audio was received for the given text.")
         if boundaries:
-            sidecar = output_path + ".boundaries.json"
-            with open_write(sidecar, "w", encoding="utf-8") as f:
-                json.dump({"type": "word", "unit": "ms", "words": boundaries},
-                          f, ensure_ascii=False)
+            from ..storage import save_json
+            save_json(output_path + ".boundaries.json", {"type": "word", "unit": "ms", "words": boundaries})
 
     async def _save_routed(self, text: str, voice: str, output_path: str, rate: str, pitch: str) -> None:
         async def save(connection):

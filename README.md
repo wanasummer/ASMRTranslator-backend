@@ -71,6 +71,13 @@ flowchart LR
 
 ## 配置与日志
 
+项目生成的非音频数据统一存储在 SQLite 中，包括字幕、阶段缓存、原始响应、
+清洗/对齐审计、编排草稿、音频元数据快照和运行日志。桌面端每个项目共用
+`generated/project.sqlite3`，音频位于 `generated/assets/`、`generated/reference-audio/`
+及 `generated/artifact/`。独立 CLI 将 `--output` 作为数据库与音频的存储根。
+接口返回的 `sqlite:` 引用是数据库文档地址，不是文件路径。
+旧版 JSON/VTT/日志文件不再作为内部存储或恢复来源。
+
 用户配置沿用用户目录下的 `.asmrts`，已有环境变量优先。
 
 | 配置项 | 说明 |

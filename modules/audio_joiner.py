@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Optional, overload
 
-from .io import write_json
+from .storage import save_json
 
 
 # Ensure ffmpeg is on PATH before pydub imports
@@ -19,7 +19,7 @@ if _ffmpeg_dir not in os.environ.get("PATH", ""):
 
 
 from pydub import AudioSegment
-from .io import write_json
+from .storage import save_json
 
 
 def get_ffmpeg_path() -> str:
@@ -190,7 +190,7 @@ def enforce_tts_budget(
             voice_src = seg.get("phantom_voice_src") or tts_file
             voice_ms = len(AudioSegment.from_file(voice_src))
             if voice_ms <= effective:
-                write_json(tempo_path, {"rate": 1.0})
+                save_json(tempo_path, {"rate": 1.0})
                 return seg
             audio = AudioSegment.from_file(tts_file)
             rate = min(voice_ms / effective, max_speed)
@@ -203,7 +203,7 @@ def enforce_tts_budget(
             audio.export(out_path, format="wav",
                          parameters=["-acodec", "pcm_s16le", "-ar", "24000", "-ac", "1"])
             seg["tts_file"] = out_path
-            write_json(tempo_path, {"rate": rate})
+            save_json(tempo_path, {"rate": rate})
             print(f"       [budget] seg {idx}: 人声 {voice_ms}ms > 预算 {effective}ms"
                   f"（{mode}）→ {'加速%.2fx' % rate if rate > 1.0 else '直接截断'} "
                   f"至 {len(audio)}ms")
@@ -410,7 +410,7 @@ def _segment_placement(seg: dict, start_ms: int, duration_ms: int) -> SegmentPla
 def _write_join_audit(output_path: str, valid_count: int, skipped: list[dict],
                       placements: list[SegmentPlacement]) -> str:
     """Persist omissions beside the joined audio; source slices remain intact."""
-    return write_json(str(Path(output_path).with_suffix(".join_audit.json")), {
+    return save_json(str(Path(output_path).with_suffix(".join_audit.json")), {
         "schemaVersion": 1,
         "stage": "audio.concat",
         "minimum_duration_ms": 50,

@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import read_text, read_json, contains, address
 """Tests for modules.vad.engine — create_vad fallback + FSMNVAD wiring + io.
 
 Run from the project root:  python -m unittest tests.test_vad_engine
@@ -154,8 +156,7 @@ class WriteVadOutputTest(unittest.TestCase):
                 "max_single_segment_time": 25000,
                 "max_end_silence_time": 1500,
             })
-            with open(os.path.join(tmp, "vad_output", "final_slices.json"),
-                      encoding="utf-8") as f:
+            with StringIO(read_text(os.path.join(tmp, "vad_output", "final_slices.json"))) as f:
                 data = json.load(f)
             self.assertEqual(
                 data["slices"],
@@ -164,8 +165,7 @@ class WriteVadOutputTest(unittest.TestCase):
                     {"start": 5.0, "end": 8.75, "duration": 3.75},
                 ],
             )
-            with open(os.path.join(tmp, "vad_output", "config.json"),
-                      encoding="utf-8") as f:
+            with StringIO(read_text(os.path.join(tmp, "vad_output", "config.json"))) as f:
                 cfg = json.load(f)
             self.assertEqual(cfg["vad_config"]["max_end_silence_time"], 1500)
 

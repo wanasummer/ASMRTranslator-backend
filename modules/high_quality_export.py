@@ -13,7 +13,8 @@ import tempfile
 import numpy as np
 
 from .audio_splitter import get_ffmpeg_path
-from .io import write_json
+from .storage import save_json
+from .storage import address, read_json
 from .task_cache import file_digest
 
 RECIPE_PATH = "debug/high_quality_export.json"
@@ -80,6 +81,8 @@ def write_export_recipe(audio_path: str, segments: list[dict], settings: dict,
     Keep source identity and all TTS fingerprints so cleared/changed caches can
     never silently produce a different reconstruction. No input is mutated.
     """
+    from .storage import initialize_project
+    initialize_project(output_dir)
     work = Path(output_dir).resolve()
     records, inputs = [], {}
     fields = ("index", "start_ms", "end_ms", "skip_tts", "tts_delay_ms", "max_allowed_tts_ms")
@@ -93,21 +96,31 @@ def write_export_recipe(audio_path: str, segments: list[dict], settings: dict,
             inputs[relative] = file_digest(str(path))
             record[key] = relative
         records.append(record)
-    return write_json(str(work / RECIPE_PATH), {
-        "contractVersion": 1, "source": {"path": str(Path(audio_path).resolve()),
-        "sha256": file_digest(audio_path)}, "settings": settings,
+    source = {"path": str(Path(audio_path).resolve()), "sha256": file_digest(audio_path)}
+    target = address(work / RECIPE_PATH)
+    project_root = target.store.root.parent if target.store.root.name == 'generated' else target.store.root
+    if Path(audio_path).resolve().is_relative_to(project_root):
+        source["projectRelativePath"] = Path(audio_path).resolve().relative_to(project_root).as_posix()
+    return save_json(str(work / RECIPE_PATH), {
+        "contractVersion": 1, "source": source, "settings": settings,
         "crossfadeMs": crossfade_ms, "overhangMs": overhang_ms,
         "segments": records, "inputs": inputs,
     })
 
 
 def load_recipe(path: str) -> tuple[dict, Path]:
-    recipe_path = Path(path).resolve()
-    work = recipe_path.parent.parent
-    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    target = address(path)
+    work = target.store.root / "assets" / target.scope if target.scope else target.store.root
+    recipe = read_json(path)
     if recipe.get("contractVersion") != 1 or not recipe.get("segments"):
         raise HighQualityExportError("高音质重建记录无效，请重新生成任务。")
     source = recipe["source"]
+    if "projectRelativePath" in source:
+        project_root = target.store.root.parent if target.store.root.name == 'generated' else target.store.root
+        rebound = (project_root / source["projectRelativePath"]).resolve()
+        if not rebound.is_relative_to(project_root):
+            raise HighQualityExportError("原音频路径超出项目范围。")
+        source["path"] = str(rebound)
     if file_digest(source["path"]) != source["sha256"]:
         raise HighQualityExportError("原音频已改变，请重新生成任务。")
     for relative, digest in recipe["inputs"].items():
