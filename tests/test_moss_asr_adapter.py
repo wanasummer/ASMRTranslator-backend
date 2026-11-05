@@ -1,6 +1,7 @@
 from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 from tests.llm_support import subtitle_stage_factory
 import unittest
+from dataclasses import replace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -96,14 +97,16 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.request.call_count, 1)
             self.assertNotIn("tail_padding_ms", client.request.call_args.kwargs)
 
-    async def test_non_speech_slice_returns_no_subtitles_and_retains_native_event(self):
+    async def test_tag_content_is_preserved_in_normal_subtitle_blocks(self):
         client = Mock()
-        body = {"language": "ja", "timeline_source": "model", "blocks": [],
-                "raw_transcript": "[clear throat]",
-                "non_speech_events": [{"type": "clear_throat", "annotation": "[clear throat]"}]}
+        body = {"language": "ja", "timeline_source": "model", "blocks": [
+            {"index": 1, "start_ms": 0, "end_ms": 1300, "text": "[clear throat]", "speaker": "S01"}],
+            "raw_transcript": "[clear throat]"}
         client.request.return_value = body, 1300
         result = await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(99.4, 100.7)])
-        self.assertEqual(result.blocks, [])
+        self.assertEqual(result.blocks[0].text, "[clear throat]")
+        self.assertEqual((result.blocks[0].start_ms, result.blocks[0].end_ms), (99400, 100700))
+        self.assertFalse(result.blocks[0].skip_tts)
         self.assertEqual(result.raw_response["slices"][0]["response"], body)
         client.request.assert_called_once_with("/transcribe", "in.wav", {"language": "ja"},
                                                start_ms=99400, end_ms=100700)
@@ -145,6 +148,28 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MossPipelineTests(unittest.TestCase):
+    def test_moss_tag_reaches_llm_as_regular_text(self):
+        client = Mock()
+        client.request.return_value = {"language": "ja", "timeline_source": "model", "blocks": [
+            {"index": 1, "start_ms": 0, "end_ms": 1300, "text": "[clear throat]", "speaker": "S01"}]}, 1300
+        received = []
+
+        def translate(blocks, config, *, preserve_source_timeline, output_dir):
+            received.extend(block.text for block in blocks)
+            return [replace(block, text="后续处理结果") for block in blocks], {"enabled": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.wav"
+            source.write_bytes(b"fixture")
+            with patch("modules.asr.create_asr", return_value=MossASRAdapter(client=client)), \
+                    patch("modules.pipeline._run_vad_stage", return_value=[SpeechRegion(0, 1.3)]), \
+                    patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
+                    redirect_stdout(StringIO()):
+                run_pipeline(str(source), "", str(Path(directory) / "work"), tts_backend="subtitles-only",
+                             asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
+                             llm_kwargs={"provider": "test"})
+        self.assertEqual(received, ["[clear throat]"])
+
     def test_vad_crops_reach_llm_and_cache_without_secondary_detection_or_cleanup(self):
         client = Mock()
         client.request.return_value = payload(), 1000
