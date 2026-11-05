@@ -96,6 +96,18 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.request.call_count, 1)
             self.assertNotIn("tail_padding_ms", client.request.call_args.kwargs)
 
+    async def test_non_speech_slice_returns_no_subtitles_and_retains_native_event(self):
+        client = Mock()
+        body = {"language": "ja", "timeline_source": "model", "blocks": [],
+                "raw_transcript": "[clear throat]",
+                "non_speech_events": [{"type": "clear_throat", "annotation": "[clear throat]"}]}
+        client.request.return_value = body, 1300
+        result = await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(99.4, 100.7)])
+        self.assertEqual(result.blocks, [])
+        self.assertEqual(result.raw_response["slices"][0]["response"], body)
+        client.request.assert_called_once_with("/transcribe", "in.wav", {"language": "ja"},
+                                               start_ms=99400, end_ms=100700)
+
     async def test_overlapping_crops_dedupe_only_matching_cross_crop_observations(self):
         first = AsrSlice("one", 0, 2000, 0, 2000, ())
         second = AsrSlice("two", 1000, 3000, 1000, 3000, ())
