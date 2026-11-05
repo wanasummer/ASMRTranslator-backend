@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 import re
 import tempfile
+import wave
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import httpx
 
-from modules.analysis_plugins import AnalysisPluginClient, AnalysisPluginError, validate_endpoint, validate_timeline
+from modules.analysis_plugins import AnalysisPluginClient, AnalysisPluginError, normalized_audio, validate_endpoint, validate_timeline
 from modules.detect import create_detect_stage
 from modules.detect.contracts import AlignmentRequest, DetectConfig, DetectStageInput, JapaneseToken, SentenceBoundary, SentenceDetection
 from modules.detect.qwen_aligner import QwenForceAlignDetectStage, QwenForceAlignSentenceAligner
@@ -26,6 +27,25 @@ from modules import preflight
 
 
 class AnalysisAdapters(unittest.TestCase):
+    def test_normalized_audio_padding_appends_only_pcm_silence_and_reports_actual_duration(self):
+        frames = b"\x01\x02" * 1600
+        def decode(command, **kwargs):
+            with wave.open(command[-1], "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(16000)
+                output.writeframes(frames)
+        with patch("modules.analysis_plugins.get_ffmpeg_path", return_value="ffmpeg"), \
+                patch("modules.analysis_plugins.subprocess.run", side_effect=decode):
+            with normalized_audio("in.wav", 1000, 1100, tail_padding_ms=1000) as (path, duration):
+                with wave.open(str(path), "rb") as audio:
+                    self.assertEqual(audio.readframes(audio.getnframes()), frames + b"\0" * 32000)
+                self.assertEqual(duration, 1100)
+        for invalid in (-1, 2001, True):
+            with self.assertRaises(AnalysisPluginError):
+                with normalized_audio("in.wav", tail_padding_ms=invalid):
+                    pass
+
     def test_http_rejection_retains_actionable_service_detail(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "audio.wav"

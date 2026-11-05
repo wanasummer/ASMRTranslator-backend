@@ -46,8 +46,11 @@ def validate_endpoint(endpoint: str) -> str:
 
 @contextmanager
 def normalized_audio(audio_path: str | Path, start_ms: int | None = None,
-                     end_ms: int | None = None) -> Iterator[tuple[Path, int]]:
+                     end_ms: int | None = None, *,
+                     tail_padding_ms: int = 0) -> Iterator[tuple[Path, int]]:
     """Decode with the same ffmpeg as the pipeline, cropping before upload."""
+    if type(tail_padding_ms) is not int or not 0 <= tail_padding_ms <= 2000:
+        raise AnalysisPluginError("Invalid analysis tail padding")
     with tempfile.TemporaryDirectory(prefix="asmr-analysis-") as directory:
         target = Path(directory) / "audio.wav"
         command = [get_ffmpeg_path(), "-nostdin", "-v", "error", "-y"]
@@ -62,6 +65,14 @@ def normalized_audio(audio_path: str | Path, start_ms: int | None = None,
         import os
         subprocess.run(command, check=True, capture_output=True, timeout=600,
                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        if tail_padding_ms:
+            padded = Path(directory) / "padded.wav"
+            with wave.open(str(target), "rb") as source, wave.open(str(padded), "wb") as output:
+                output.setparams(source.getparams())
+                while frames := source.readframes(16000):
+                    output.writeframesraw(frames)
+                output.writeframes(b"\0" * (tail_padding_ms * 32))
+            target = padded
         with wave.open(str(target), "rb") as audio:
             duration_ms = round(audio.getnframes() / 16)
         yield target, duration_ms
@@ -75,9 +86,11 @@ class AnalysisPluginClient:
         self.policy = NetworkPolicy()
 
     def request(self, route: str, audio_path: str | Path, data: dict[str, Any], *,
-                start_ms: int | None = None, end_ms: int | None = None) -> tuple[dict[str, Any], int]:
+                start_ms: int | None = None, end_ms: int | None = None,
+                tail_padding_ms: int = 0) -> tuple[dict[str, Any], int]:
         try:
-            with normalized_audio(audio_path, start_ms, end_ms) as (wav, duration):
+            padding = {"tail_padding_ms": tail_padding_ms} if tail_padding_ms else {}
+            with normalized_audio(audio_path, start_ms, end_ms, **padding) as (wav, duration):
                 request_id = uuid4().hex
                 with sync_client(client_factory=self.client_factory, network_policy=self.policy, timeout=21600) as client:
                     with wav.open("rb") as audio:

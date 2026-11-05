@@ -526,7 +526,7 @@ def run_pipeline(
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
-                "stage_contract_version": 2,
+                "stage_contract_version": 3,
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
                 "detect": detect_cache_signature(detect_config) if detect_enabled else None,

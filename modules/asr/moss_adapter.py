@@ -53,6 +53,9 @@ def merge_slice_blocks(blocks: Sequence[VTTBlock]) -> list[VTTBlock]:
 
 
 class MossASRAdapter(ASRAdapter):
+    _RECOVERY_PADDING_MS = 1000
+    _MAX_TAIL_DRIFT_MS = 250
+
     def __init__(self, endpoint="http://127.0.0.1:8008", language="ja", *, client=None, **_ignored):
         if language != "ja":
             raise ASRError("MOSS 主程序适配器目前只接入日语转写")
@@ -105,14 +108,30 @@ class MossASRAdapter(ASRAdapter):
         blocks, responses = [], []
         speaker_count = 0
         for position, (start, end, parent) in enumerate(crops, 1):
+            recovery = None
             try:
-                body, duration = await asyncio.to_thread(
-                    self.client.request, "/transcribe", audio_path, {"language": "ja"},
-                    start_ms=start, end_ms=end,
-                )
-                if abs(duration - (end - start)) > 1:
+                try:
+                    body, duration = await asyncio.to_thread(
+                        self.client.request, "/transcribe", audio_path, {"language": "ja"},
+                        start_ms=start, end_ms=end,
+                    )
+                except AnalysisPluginError as exc:
+                    if (exc.code != "ANALYSIS_HTTP_422"
+                            or "Invalid MOSS timestamps or empty segment" not in str(exc)):
+                        raise
+                    print(f"       [moss] 切片 {position}/{len(crops)} 时间戳校验失败，补尾部静音重试一次")
+                    recovery = {"reason": str(exc), "tail_padding_ms": self._RECOVERY_PADDING_MS,
+                                "source_duration_ms": end - start, "adjustments": []}
+                    body, duration = await asyncio.to_thread(
+                        self.client.request, "/transcribe", audio_path, {"language": "ja"},
+                        start_ms=start, end_ms=end, tail_padding_ms=self._RECOVERY_PADDING_MS,
+                    )
+                expected_duration = end - start + (self._RECOVERY_PADDING_MS if recovery else 0)
+                if abs(duration - expected_duration) > 1:
                     raise ASRError("MOSS 返回音频长度与 VAD 切片不符")
                 result = self.parse_result(body, duration)
+                if recovery:
+                    result = self._restore_padded_result(result, end - start, recovery)
             except AnalysisPluginError as exc:
                 raise ASRError(f"MOSS 第 {position}/{len(crops)} 片转写失败：{exc}") from exc
             speakers = {}
@@ -125,11 +144,26 @@ class MossASRAdapter(ASRAdapter):
                     speaker=speakers[block.speaker], asr_slice=parent, source_text=block.text,
                 ))
             responses.append({"slice_id": parent.id, "start_ms": start, "end_ms": end,
-                              "speaker_map": speakers, "response": body})
+                              "speaker_map": speakers, "response": body, "recovery": recovery})
             print(f"       [moss] 切片 {position}/{len(crops)}：{len(result.blocks)} 个字幕块")
         return MossDocumentResult("ja", merge_slice_blocks(blocks),
-            raw_response={"policy_version": "project-vad-v1", "speaker_scope": "slice",
+            raw_response={"policy_version": "project-vad-v2", "speaker_scope": "slice",
                           "slices": responses})
+
+    @classmethod
+    def _restore_padded_result(cls, result, source_duration_ms, audit):
+        """Allow bounded endpoint drift, never accept subtitles in added silence."""
+        blocks = []
+        for block in result.blocks:
+            if (block.start_ms >= source_duration_ms
+                    or block.end_ms > source_duration_ms + cls._MAX_TAIL_DRIFT_MS):
+                raise ASRError("MOSS 补静音重试后字幕仍超出原切片边界")
+            end = min(block.end_ms, source_duration_ms)
+            if end != block.end_ms:
+                audit["adjustments"].append({"index": block.index, "end_ms": block.end_ms,
+                                             "restored_end_ms": end})
+            blocks.append(replace(block, end_ms=end))
+        return replace(result, blocks=blocks)
 
     @staticmethod
     def parse_result(body, duration_ms) -> MossDocumentResult:
