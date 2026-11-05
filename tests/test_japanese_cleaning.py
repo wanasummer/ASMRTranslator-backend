@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from modules.japanese_cleaning import (
+from modules.cleaning import (
     JapaneseCleanerUnavailableError,
     MecabRegexJapaneseCleaner,
     MecabTokenizer,
@@ -91,7 +91,7 @@ class JapaneseCleanerFallbackTest(unittest.TestCase):
         fallback = RegexJapaneseCleaner()
         unavailable = JapaneseCleanerUnavailableError("dictionary unavailable")
         with mock.patch(
-            "modules.japanese_cleaning.create_japanese_cleaner",
+            "modules.cleaning.create_japanese_cleaner",
             side_effect=unavailable,
         ) as create:
             from modules.error import PipelineError

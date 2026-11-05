@@ -409,7 +409,7 @@ class PipelineHandoffTests(unittest.TestCase):
 
     def test_detect_runs_before_cleaner_and_translation_keeps_its_timeline(self):
         from modules.pipeline import run_pipeline
-        from modules.japanese_cleaning.mecab_regex import RegexJapaneseCleaner
+        from modules.cleaning import RegexJapaneseCleaner
 
         slices, analysis = analyze_regions([SpeechRegion(1, 3)], {})
         parent = VTTBlock(

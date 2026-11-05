@@ -252,7 +252,9 @@ Examples:
                              "with HTTP 429 (default: 3)")
     parser.add_argument("--japanese-cleaner", type=str, default="mecab-regex",
                         help="Japanese ASR cleanup implementation registered in "
-                             "modules.japanese_cleaning (default: mecab-regex)")
+                             "modules.cleaning (default: mecab-regex)")
+    parser.add_argument("--no-japanese-clean", action="store_true",
+                        help="Disable Japanese ASR cleanup before translation")
     parser.add_argument("--detect-stage", "--vad-sentence-realignment-beta",
                         dest="detect_stage", action="store_true",
                         help="Enable Japanese sentence detection after ASR and before cleanup")
@@ -373,7 +375,7 @@ Examples:
     # Build/runtime health check: initialize the packaged MeCab extension,
     # open the bundled UniDic files, and perform one real tokenization.
     if args.check_japanese_runtime:
-        from modules.japanese_cleaning import MecabTokenizer
+        from modules.cleaning import MecabTokenizer
 
         diagnostic = {"available": False, "tokenizer": "mecab-unidic-lite"}
         try:
@@ -657,6 +659,7 @@ Examples:
         asr_backend=args.asr_backend,
         asr_max_concurrent=args.asr_max_concurrent,
         japanese_cleaner=args.japanese_cleaner,
+        japanese_clean_enabled=not args.no_japanese_clean,
         vad_enabled=not args.no_vad,
         detect_enabled=args.detect_stage,
         sentence_aligner=args.sentence_aligner,

@@ -174,15 +174,20 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
     return blocks, language, path
 
 
-def _create_japanese_cleaner_with_fallback(name: str):
-    """Create the configured cleaner; configured implementations are required."""
-    from .japanese_cleaning import (
+def _create_japanese_cleaner_with_fallback(name: str, *, enabled: bool = True):
+    """Create the configured Japanese cleaning capability; configured implementations are required."""
+    from . import cleaning
+    from .cleaning import (
+        JapaneseCleanCapability,
+        JapaneseCleanConfig,
         JapaneseCleanerUnavailableError,
-        create_japanese_cleaner,
     )
 
     try:
-        return create_japanese_cleaner(name)
+        return JapaneseCleanCapability(
+            JapaneseCleanConfig(enabled=enabled, cleaner=name),
+            cleaner_factory=cleaning.create_japanese_cleaner,
+        )
     except JapaneseCleanerUnavailableError as error:
         from .error import ConfigurationError, descriptor
         raise ConfigurationError(
@@ -285,35 +290,22 @@ def write_vad_output(output_dir: str, raw_regions, final_slices, cfg: dict) -> s
     return dir_path
 
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-
-
 def count_cjk_chars(text: str) -> int:
-    """Count Chinese characters in ``text`` (CJK Unified Ideographs only).
+    """Count Chinese characters in ``text`` (delegates to capInterjectionSkip)."""
+    from .cleaning.capabilities.capInterjectionSkip import (
+        count_cjk_chars as _count_cjk_chars,
+    )
 
-    Punctuation, whitespace, kana, Latin and digits are all excluded, so the
-    result is exactly "the number of Chinese characters after removing
-    punctuation" — the rule used to detect interjection fragments.
-    """
-    return len(_CJK_RE.findall(text or ""))
+    return _count_cjk_chars(text)
 
 
 def mark_interjection_skips(blocks, max_chars: int = 3, *, enabled: bool = True) -> int:
-    """Flag blocks whose translated text is too short to dub.
+    """Flag blocks whose translated text is too short to dub (delegates to capInterjectionSkip)."""
+    from .cleaning import InterjectionSkipCapability, InterjectionSkipConfig
 
-    A block whose text holds ≤ ``max_chars`` Chinese characters (after removing
-    punctuation) is mostly a 语气词/短叹 (e.g. "嗯", "啊，呀！") — set
-    ``block.skip_tts = True`` so the pipeline skips its translation TTS and keeps
-    the original audio for that span. Returns the number of blocks flagged.
-    """
-    if not enabled:
-        return 0
-    flagged = 0
-    for b in blocks:
-        if not b.skip_tts and count_cjk_chars(b.text) <= max_chars:
-            b.skip_tts = True
-            flagged += 1
-    return flagged
+    return InterjectionSkipCapability(
+        InterjectionSkipConfig(enabled=enabled, max_chars=max_chars)
+    ).mark_in_place(blocks)
 
 
 # Keys of the run_pipeline vad_* parameters forwarded to optimize_asmr_segments.
@@ -395,6 +387,7 @@ def run_pipeline(
     asr_backend: str = "fish-asr",
     asr_max_concurrent: int = 3,
     japanese_cleaner: str = "mecab-regex",
+    japanese_clean_enabled: bool = True,
     vad_enabled: bool = True,
     vad_max_end_silence_time: int = 1500,
     vad_max_single_segment_time: int = 25000,
@@ -516,7 +509,7 @@ def run_pipeline(
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
                 "audio": file_digest(audio_path), "backend": asr_backend,
-                "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner,
+                "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
                 "detect": detect_cache_signature(detect_config) if detect_enabled else None,
                 "vad": vad_cfg,
             })
@@ -610,10 +603,10 @@ def run_pipeline(
 
                 # Japanese cleanup consumes only Japanese ASR output. Empty
                 # blocks remain on the authored timeline with skip_tts=True.
-                from .japanese_cleaning import (
+                from .cleaning import (
                     write_cleaning_artifacts,
                 )
-                cleaner = _create_japanese_cleaner_with_fallback(japanese_cleaner)
+                cleaner = _create_japanese_cleaner_with_fallback(japanese_cleaner) if japanese_clean_enabled else _create_japanese_cleaner_with_fallback(japanese_cleaner, enabled=False)
                 cleaning_result = cleaner.clean(blocks)
                 blocks = cleaning_result.blocks
                 artifacts = write_cleaning_artifacts(cleaning_result, output_dir)

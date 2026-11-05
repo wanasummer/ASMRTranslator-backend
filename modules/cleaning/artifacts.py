@@ -1,11 +1,11 @@
-"""Persistence adapter for Japanese-cleaning diagnostics."""
+"""Persistence adapter for cleaning diagnostics."""
 
 from __future__ import annotations
 
 import os
 
 from ..io import intermediate_dir, write_json, write_text
-from .models import JapaneseCleaningResult
+from .contracts import JapaneseCleaningResult
 
 
 def _timestamp(ms: int) -> str:

@@ -45,6 +45,9 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
   Capabilities consume typed text rows and an injected text-generation port;
   they must not import pipeline, audio, or subtitle domain modules. Subtitle
   timing and business orchestration belong in `modules/subtitle_processing/`.
+- Keep subtitle and text cleaning policies in `modules/cleaning/`, with one
+  independently toggleable capability per `capabilities/capXxx/` directory
+  (`capJapaneseClean`, `capInterjectionSkip`) backed by its own `Config`.
 
 - Keep public contracts typed and explicit. Use dataclasses, TypedDicts, Protocols,
   or abstract base classes where they make boundaries clearer.

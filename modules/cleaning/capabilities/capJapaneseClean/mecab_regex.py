@@ -6,14 +6,38 @@ import copy
 import os
 import re
 import unicodedata
-from typing import Protocol
 
-from .base import JapaneseCleaner, JapaneseCleanerUnavailableError
-from .models import CleaningRecord, JapaneseCleaningResult, MorphToken
+from ...contracts import (
+    CleaningRecord,
+    JapaneseCleaner,
+    JapaneseCleanerUnavailableError,
+    JapaneseCleaningResult,
+    MorphToken,
+    MorphTokenizer,
+)
 
 
 DROP_POS_LARGE = frozenset({"感動詞", "フィラー"})
 DROP_POS_DETAIL = frozenset({("助詞", "終助詞"), ("助詞", "間投助詞")})
+KEEP_POS_DETAIL = frozenset({("感動詞", "挨拶")})
+# UniDic-lite classifies common lexical greetings under (感動詞, 一般) rather
+# than a dedicated 挨拶 subcategory; preserve them so greeting lines are not
+# wiped out before translation.
+KEEP_GREETING_SURFACES = frozenset({
+    "こんばんは",
+    "今晩は",
+    "こんにちは",
+    "今日は",
+    "おはよう",
+    "お早う",
+    "御早う",
+    "ありがとう",
+    "有難う",
+    "有り難う",
+    "さようなら",
+    "さよなら",
+    "左様なら",
+})
 
 # Fish ASR occasionally emits Chinese graphemes for non-lexical breathing sounds
 # even when language=ja. MeCab cannot classify these with a Japanese dictionary.
@@ -28,15 +52,6 @@ _PURE_VOCALIZATION_RE = re.compile(
 _EFFECTIVE_CONTENT_RE = re.compile(
     r"[一-龯々〆ヵヶぁ-ゖァ-ヺA-Za-z0-9]"
 )
-
-
-class MorphTokenizer(Protocol):
-    """Small adapter contract that keeps the cleaner independent of MeCab."""
-
-    @property
-    def name(self) -> str: ...
-
-    def tokenize(self, text: str) -> list[MorphToken]: ...
 
 
 class MecabTokenizer:
@@ -100,6 +115,11 @@ class MecabRegexJapaneseCleaner(JapaneseCleaner):
 
     @staticmethod
     def _drop_token(token: MorphToken) -> bool:
+        if (
+            (token.pos_large, token.pos_detail) in KEEP_POS_DETAIL
+            or token.surface in KEEP_GREETING_SURFACES
+        ):
+            return False
         return (
             token.pos_large in DROP_POS_LARGE
             or (token.pos_large, token.pos_detail) in DROP_POS_DETAIL
