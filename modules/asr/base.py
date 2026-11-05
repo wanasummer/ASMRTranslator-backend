@@ -56,7 +56,12 @@ class ASRAdapter(ABC):
 
 @runtime_checkable
 class DocumentASRAdapter(Protocol):
-    """Structural contract for services that transcribe one complete audio file."""
+    """Structural contract for services returning a recording-level document.
+
+    An implementation may process caller-provided VAD slices internally. Results
+    may set japanese_cleanup_required=False when they own the complete boundary
+    before subtitle translation; native timeline ownership is independent.
+    """
 
     def uses_project_vad(self) -> bool:
         """Whether the caller must provide the authored project-VAD timeline."""

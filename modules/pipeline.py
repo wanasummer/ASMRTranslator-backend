@@ -97,6 +97,9 @@ def _serialize_parsed_vtt_block(block) -> dict:
         "source_text": getattr(block, "source_text", ""),
         "skip_tts": getattr(block, "skip_tts", False),
     }
+    if getattr(block, "asr_slice", None) is not None:
+        from dataclasses import asdict
+        row["asr_slice"] = asdict(block.asr_slice)
     aligned = getattr(block, "aligned_sentence", None)
     source_block_id = getattr(aligned, "source_block_id", None)
     if source_block_id:
@@ -115,22 +118,27 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
 
     Japanese ASR resumes from the cleaned artifact because sentence detection
     and Japanese cleanup have already completed. Chinese ASR resumes from the
-    raw artifact because it is already the final ASR-stage contract.
+    raw artifact because it is already the final ASR-stage contract. Document
+    adapters owning that boundary record their selected artifact explicitly.
     """
     configured = str(
         asr_kwargs.get("output_language", asr_kwargs.get("language", "ja"))
     ).strip().lower()
     language = "zh" if configured.startswith("zh") else "ja"
-    filename = "raw.vtt" if language == "zh" else "cleaned.vtt"
-    path = os.path.join(output_dir, "asr_subtitles", filename)
-    if not contains(path):
-        return None
     record = None
     if expected_key:
         from .task_cache import SqliteResultCache
         record = SqliteResultCache(output_dir, "asr_stage_results").load(expected_key)
-        if not record or record.get("sha256") != document_digest(path):
+        if not record:
             return None
+    filename = "raw.vtt" if language == "zh" else "cleaned.vtt"
+    if record:
+        filename = record.get("artifact_filename", filename)
+    if filename not in {"raw.vtt", "cleaned.vtt"}:
+        return None
+    path = os.path.join(output_dir, "asr_subtitles", filename)
+    if not contains(path) or (record and record.get("sha256") != document_digest(path)):
+        return None
     try:
         from .subtitles.vtt_adapter import VTTAdapter
         from .vtt_parser import VTTBlock
@@ -149,6 +157,14 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
                 block.source_text = meta["source_text"]
             if isinstance(meta.get("skip_tts"), bool):
                 block.skip_tts = meta["skip_tts"]
+            if isinstance(meta.get("asr_slice"), dict):
+                from .vad.contracts import AsrSlice
+                try:
+                    value = dict(meta["asr_slice"])
+                    value["region_ids"] = tuple(value.get("region_ids", ()))
+                    block.asr_slice = AsrSlice(**value)
+                except (TypeError, ValueError):
+                    return None
             source_block_id = meta.get("source_block_id")
             if isinstance(source_block_id, str) and source_block_id:
                 block.aligned_sentence = AlignedSentenceBlock(
@@ -489,6 +505,7 @@ def run_pipeline(
         ps("Preparing subtitles (VTT / ASR)...")
         asr_output_language = None
         asr_preserve_timeline = False
+        asr_needs_japanese_cleanup = True
 
         from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
         vad_cfg = resolve_vad_config({
@@ -509,6 +526,7 @@ def run_pipeline(
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
+                "stage_contract_version": 2,
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
                 "detect": detect_cache_signature(detect_config) if detect_enabled else None,
@@ -577,6 +595,7 @@ def run_pipeline(
                         write_document_artifacts(result, output_dir)
                         blocks = result.blocks
                         asr_preserve_timeline = getattr(result, "preserve_source_timeline", False) is True
+                        asr_needs_japanese_cleanup = getattr(result, "japanese_cleanup_required", True)
                         asr_output_language = result.language
                         print(f"       [asr] 服务来源 {result.source}，时间轴 {result.timeline_source}")
                 else:
@@ -595,7 +614,9 @@ def run_pipeline(
             except Exception as e:
                 print(f"       [warn] ASR 字幕保存失败: {e}")
 
-            if asr_output_language == "ja":
+            if asr_output_language == "ja" and not asr_needs_japanese_cleanup:
+                print("       [asr] 使用服务返回的日语字幕和时间轴，直接进入 LLM 阶段")
+            elif asr_output_language == "ja":
                 if detect_stage is not None:
                     from .detect.contracts import DetectStageInput
 
@@ -630,12 +651,13 @@ def run_pipeline(
 
             if asr_cache_key:
                 asr_preserve_timeline = asr_preserve_timeline or detect_stage is not None
-                filename = "raw.vtt" if asr_output_language == "zh" else "cleaned.vtt"
+                filename = "raw.vtt" if asr_output_language == "zh" or not asr_needs_japanese_cleanup else "cleaned.vtt"
                 cached_path = os.path.join(output_dir, "asr_subtitles", filename)
                 if contains(cached_path):
                     SqliteResultCache(output_dir, "asr_stage_results").save(
                         asr_cache_key, {
                             "sha256": document_digest(cached_path),
+                            "artifact_filename": filename,
                             "preserve_source_timeline": asr_preserve_timeline,
                             "block_lineage": [
                                 _serialize_parsed_vtt_block(b) for b in blocks

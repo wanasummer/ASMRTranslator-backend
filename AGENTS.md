@@ -37,6 +37,11 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
   aligner registry or pass FSMN sentence evidence into Qwen's partitioner.
 - Include the selected intermediate pipeline's effective settings and policy
   version in its cache identity when changing its behavior.
+- MOSS consumes project VAD slices sequentially and owns the ASR-to-LLM
+  boundary, including native subtitle segmentation and timestamps. Do not send
+  the whole recording or run Qwen/FSMN/MeCab sentence detection or generic
+  Japanese cleanup on its output. Restore slice-relative times to the recording
+  timeline, retain VAD lineage, and scope native speaker IDs to each slice.
 
 ## Code Conventions
 
