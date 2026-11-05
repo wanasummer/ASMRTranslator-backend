@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Sequence
@@ -54,8 +54,6 @@ def merge_slice_blocks(blocks: Sequence[VTTBlock]) -> list[VTTBlock]:
 
 
 class MossASRAdapter(ASRAdapter):
-    _RECOVERY_PADDING_MS = 1000
-
     def __init__(self, endpoint="http://127.0.0.1:8008", language="ja", *, client=None, **_ignored):
         if language != "ja":
             raise ASRError("MOSS 主程序适配器目前只接入日语转写")
@@ -108,37 +106,14 @@ class MossASRAdapter(ASRAdapter):
         blocks, responses = [], []
         speaker_count = 0
         for position, (start, end, parent) in enumerate(crops, 1):
-            recovery = None
             try:
-                try:
-                    body, duration = await asyncio.to_thread(
-                        self.client.request, "/transcribe", audio_path, {"language": "ja"},
-                        start_ms=start, end_ms=end,
-                    )
-                except AnalysisPluginError as exc:
-                    if (exc.code != "ANALYSIS_HTTP_422"
-                            or "Invalid MOSS timestamps or empty segment" not in str(exc)):
-                        raise
-                    print(f"       [moss] 切片 {position}/{len(crops)} 时间戳校验失败，补尾部静音重试一次")
-                    recovery = {"reason": str(exc), "tail_padding_ms": self._RECOVERY_PADDING_MS,
-                                "source_duration_ms": end - start, "adjustments": []}
-                    body, duration = await asyncio.to_thread(
-                        self.client.request, "/transcribe", audio_path, {"language": "ja"},
-                        start_ms=start, end_ms=end, tail_padding_ms=self._RECOVERY_PADDING_MS,
-                    )
-                expected_duration = end - start + (self._RECOVERY_PADDING_MS if recovery else 0)
-                if abs(duration - expected_duration) > 1:
+                body, duration = await asyncio.to_thread(
+                    self.client.request, "/transcribe", audio_path, {"language": "ja"},
+                    start_ms=start, end_ms=end,
+                )
+                if abs(duration - (end - start)) > 1:
                     raise ASRError("MOSS 返回音频长度与 VAD 切片不符")
                 result = self.parse_result(body, duration)
-                if recovery:
-                    try:
-                        calibrated = calibrate_final_subtitle_end(result.blocks, end - start)
-                    except SubtitleTimelineError as exc:
-                        raise ASRError(f"MOSS 末条字幕校准失败：{exc}") from exc
-                    result = replace(result, blocks=list(calibrated.blocks))
-                    recovery["adjustments"] = [asdict(item) for item in calibrated.adjustments]
-                    if calibrated.adjustments:
-                        print(f"       [moss] 切片 {position}/{len(crops)}：末条字幕终点已校准到原切片末尾")
             except AnalysisPluginError as exc:
                 raise ASRError(f"MOSS 第 {position}/{len(crops)} 片转写失败：{exc}") from exc
             speakers = {}
@@ -151,10 +126,10 @@ class MossASRAdapter(ASRAdapter):
                     speaker=speakers[block.speaker], asr_slice=parent, source_text=block.text,
                 ))
             responses.append({"slice_id": parent.id, "start_ms": start, "end_ms": end,
-                              "speaker_map": speakers, "response": body, "recovery": recovery})
+                              "speaker_map": speakers, "response": body})
             print(f"       [moss] 切片 {position}/{len(crops)}：{len(result.blocks)} 个字幕块")
         return MossDocumentResult("ja", merge_slice_blocks(blocks),
-            raw_response={"policy_version": "project-vad-v3-final-subtitle", "speaker_scope": "slice",
+            raw_response={"policy_version": "project-vad-v5-original-audio", "speaker_scope": "slice",
                           "slices": responses})
 
     @staticmethod
@@ -172,10 +147,14 @@ class MossASRAdapter(ASRAdapter):
             text, speaker = row.get("text"), row.get("speaker")
             if (type(row.get("index")) is not int or row["index"] != position
                     or type(start) is not int or type(end) is not int
-                    or not previous <= start < end <= duration_ms
+                    or not previous <= start < end or start >= duration_ms
                     or not isinstance(text, str) or not text.strip()
                     or not isinstance(speaker, str) or re.fullmatch(r"S\d+", speaker) is None):
                 raise ASRError(f"MOSS 字幕时间轴或说话人无效：blocks[{position - 1}]")
             blocks.append(VTTBlock(position - 1, start, end, text, speaker=speaker))
             previous = start
-        return MossDocumentResult("ja", blocks, raw_response=body)
+        try:
+            calibrated = calibrate_final_subtitle_end(blocks, duration_ms)
+        except SubtitleTimelineError as exc:
+            raise ASRError(f"MOSS 字幕时间轴无效：{exc}") from exc
+        return MossDocumentResult("ja", list(calibrated.blocks), raw_response=body)

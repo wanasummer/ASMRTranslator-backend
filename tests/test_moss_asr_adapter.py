@@ -76,51 +76,25 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ASRError, "长度"):
             await MossASRAdapter(client=client).transcribe_document("input.wav", [SpeechRegion(1, 2)])
 
-    async def test_timestamp_rejection_retries_with_silence_and_calibrates_only_final_end(self):
+    async def test_requests_original_crop_once_and_calibrates_only_last_subtitle(self):
         client = Mock()
-        original = payload()
-        original["blocks"][-1]["end_ms"] = 1800
-        client.request.side_effect = [
-            AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_422"),
-            (original, 2000),
-        ]
-        result = await MossASRAdapter(client=client).transcribe_document("input.wav", [SpeechRegion(10, 11)])
-        self.assertEqual(client.request.call_args.kwargs,
-                         {"start_ms": 10000, "end_ms": 11000, "tail_padding_ms": 1000})
-        self.assertEqual(result.blocks[-1].end_ms, 11000)
-        self.assertEqual(original["blocks"][-1]["end_ms"], 1800)
-        self.assertEqual(result.blocks[0].end_ms, 10700)
-        self.assertEqual(result.blocks[-1].start_ms, 10600)
-        recovery = result.raw_response["slices"][0]["recovery"]
-        self.assertEqual(recovery["adjustments"], [{"index": 1, "end_ms": 1800, "restored_end_ms": 1000}])
+        body = payload()
+        body["blocks"][-1]["end_ms"] = 1800
+        client.request.return_value = body, 1000
+        result = await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(10, 11)])
+        client.request.assert_called_once_with("/transcribe", "in.wav", {"language": "ja"},
+                                               start_ms=10000, end_ms=11000)
+        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(10000, 10700), (10600, 11000)])
+        self.assertEqual(body["blocks"][-1]["end_ms"], 1800)
 
-    async def test_recovery_never_retries_other_errors_or_repairs_nonfinal_blocks(self):
-        for error in (AnalysisPluginError("different validation error", code="ANALYSIS_HTTP_422"),
-                      AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_500")):
+    async def test_plugin_rejections_are_never_retried_or_padded(self):
+        for message in ("Malformed or incomplete MOSS transcript", "Invalid MOSS timestamps or empty segment"):
             client = Mock()
-            client.request.side_effect = error
-            with self.assertRaises(ASRError):
+            client.request.side_effect = AnalysisPluginError(message, code="ANALYSIS_HTTP_422")
+            with self.assertRaisesRegex(ASRError, "1/1"):
                 await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(0, 1)])
             self.assertEqual(client.request.call_count, 1)
-        for target, start, end in ((0, 0, 1251), (1, 1000, 1080)):
-            client = Mock()
-            body = payload()
-            body["blocks"][target].update(start_ms=start, end_ms=end)
-            client.request.side_effect = [
-                AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_422"),
-                (body, 2000),
-            ]
-            with self.assertRaisesRegex(ASRError, "末条字幕校准失败"):
-                await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(0, 1)])
-            self.assertEqual(client.request.call_count, 2)
-
-    async def test_second_validation_failure_is_not_retried_again(self):
-        client = Mock()
-        client.request.side_effect = AnalysisPluginError(
-            "Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_422")
-        with self.assertRaisesRegex(ASRError, "1/1"):
-            await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(0, 1)])
-        self.assertEqual(client.request.call_count, 2)
+            self.assertNotIn("tail_padding_ms", client.request.call_args.kwargs)
 
     async def test_overlapping_crops_dedupe_only_matching_cross_crop_observations(self):
         first = AsrSlice("one", 0, 2000, 0, 2000, ())
