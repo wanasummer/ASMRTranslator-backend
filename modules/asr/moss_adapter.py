@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import math
 import re
 from typing import Sequence
@@ -12,6 +12,7 @@ from ..error import ASRError
 from ..vtt_parser import VTTBlock
 from ..vad.contracts import AsrSlice
 from ..vad.models import SpeechRegion
+from ..subtitle_timeline import calibrate_final_subtitle_end, SubtitleTimelineError
 from .base import ASRAdapter
 from .models import ASRResult
 
@@ -54,7 +55,6 @@ def merge_slice_blocks(blocks: Sequence[VTTBlock]) -> list[VTTBlock]:
 
 class MossASRAdapter(ASRAdapter):
     _RECOVERY_PADDING_MS = 1000
-    _MAX_TAIL_DRIFT_MS = 250
 
     def __init__(self, endpoint="http://127.0.0.1:8008", language="ja", *, client=None, **_ignored):
         if language != "ja":
@@ -131,7 +131,14 @@ class MossASRAdapter(ASRAdapter):
                     raise ASRError("MOSS 返回音频长度与 VAD 切片不符")
                 result = self.parse_result(body, duration)
                 if recovery:
-                    result = self._restore_padded_result(result, end - start, recovery)
+                    try:
+                        calibrated = calibrate_final_subtitle_end(result.blocks, end - start)
+                    except SubtitleTimelineError as exc:
+                        raise ASRError(f"MOSS 末条字幕校准失败：{exc}") from exc
+                    result = replace(result, blocks=list(calibrated.blocks))
+                    recovery["adjustments"] = [asdict(item) for item in calibrated.adjustments]
+                    if calibrated.adjustments:
+                        print(f"       [moss] 切片 {position}/{len(crops)}：末条字幕终点已校准到原切片末尾")
             except AnalysisPluginError as exc:
                 raise ASRError(f"MOSS 第 {position}/{len(crops)} 片转写失败：{exc}") from exc
             speakers = {}
@@ -147,23 +154,8 @@ class MossASRAdapter(ASRAdapter):
                               "speaker_map": speakers, "response": body, "recovery": recovery})
             print(f"       [moss] 切片 {position}/{len(crops)}：{len(result.blocks)} 个字幕块")
         return MossDocumentResult("ja", merge_slice_blocks(blocks),
-            raw_response={"policy_version": "project-vad-v2", "speaker_scope": "slice",
+            raw_response={"policy_version": "project-vad-v3-final-subtitle", "speaker_scope": "slice",
                           "slices": responses})
-
-    @classmethod
-    def _restore_padded_result(cls, result, source_duration_ms, audit):
-        """Allow bounded endpoint drift, never accept subtitles in added silence."""
-        blocks = []
-        for block in result.blocks:
-            if (block.start_ms >= source_duration_ms
-                    or block.end_ms > source_duration_ms + cls._MAX_TAIL_DRIFT_MS):
-                raise ASRError("MOSS 补静音重试后字幕仍超出原切片边界")
-            end = min(block.end_ms, source_duration_ms)
-            if end != block.end_ms:
-                audit["adjustments"].append({"index": block.index, "end_ms": block.end_ms,
-                                             "restored_end_ms": end})
-            blocks.append(replace(block, end_ms=end))
-        return replace(result, blocks=blocks)
 
     @staticmethod
     def parse_result(body, duration_ms) -> MossDocumentResult:

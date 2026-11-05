@@ -76,10 +76,10 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ASRError, "长度"):
             await MossASRAdapter(client=client).transcribe_document("input.wav", [SpeechRegion(1, 2)])
 
-    async def test_timestamp_rejection_retries_with_silence_and_audits_bounded_tail_drift(self):
+    async def test_timestamp_rejection_retries_with_silence_and_calibrates_only_final_end(self):
         client = Mock()
         original = payload()
-        original["blocks"][-1]["end_ms"] = 1080
+        original["blocks"][-1]["end_ms"] = 1800
         client.request.side_effect = [
             AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_422"),
             (original, 2000),
@@ -88,11 +88,13 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.request.call_args.kwargs,
                          {"start_ms": 10000, "end_ms": 11000, "tail_padding_ms": 1000})
         self.assertEqual(result.blocks[-1].end_ms, 11000)
-        self.assertEqual(original["blocks"][-1]["end_ms"], 1080)
+        self.assertEqual(original["blocks"][-1]["end_ms"], 1800)
+        self.assertEqual(result.blocks[0].end_ms, 10700)
+        self.assertEqual(result.blocks[-1].start_ms, 10600)
         recovery = result.raw_response["slices"][0]["recovery"]
-        self.assertEqual(recovery["adjustments"], [{"index": 1, "end_ms": 1080, "restored_end_ms": 1000}])
+        self.assertEqual(recovery["adjustments"], [{"index": 1, "end_ms": 1800, "restored_end_ms": 1000}])
 
-    async def test_recovery_never_retries_other_errors_or_accepts_large_drift(self):
+    async def test_recovery_never_retries_other_errors_or_repairs_nonfinal_blocks(self):
         for error in (AnalysisPluginError("different validation error", code="ANALYSIS_HTTP_422"),
                       AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_500")):
             client = Mock()
@@ -100,15 +102,15 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ASRError):
                 await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(0, 1)])
             self.assertEqual(client.request.call_count, 1)
-        for start, end in ((600, 1251), (1000, 1080)):
+        for target, start, end in ((0, 0, 1251), (1, 1000, 1080)):
             client = Mock()
             body = payload()
-            body["blocks"][-1].update(start_ms=start, end_ms=end)
+            body["blocks"][target].update(start_ms=start, end_ms=end)
             client.request.side_effect = [
                 AnalysisPluginError("Invalid MOSS timestamps or empty segment", code="ANALYSIS_HTTP_422"),
                 (body, 2000),
             ]
-            with self.assertRaisesRegex(ASRError, "原切片边界"):
+            with self.assertRaisesRegex(ASRError, "末条字幕校准失败"):
                 await MossASRAdapter(client=client).transcribe_document("in.wav", [SpeechRegion(0, 1)])
             self.assertEqual(client.request.call_count, 2)
 
