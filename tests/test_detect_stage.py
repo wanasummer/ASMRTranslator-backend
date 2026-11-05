@@ -362,7 +362,7 @@ class DetectStageTests(unittest.TestCase):
         self.assertFalse(detect_eligible(**{**args, "enabled": False}))
         self.assertFalse(detect_eligible(**{**args, "subtitle_path": "input.vtt"}))
         self.assertFalse(detect_eligible(**{**args, "language": "zh"}))
-        self.assertFalse(detect_eligible(**{**args, "backend": "moss-transcribe-diarize"}))
+        self.assertTrue(detect_eligible(**{**args, "backend": "moss-transcribe-diarize"}))
         self.assertTrue(detect_eligible(**{**args, "sentence_aligner": "qwen-force-align"}))
         for backend in ("fish-asr", "common-asr", "qwen-audio-3.1-asr-flash",
                         "fun-asr", "mimo-asr", "chickenrice"):

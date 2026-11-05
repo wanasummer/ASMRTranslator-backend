@@ -1,4 +1,4 @@
-"""Independent MOSS document adapter retaining native timestamps and speakers."""
+"""MOSS recognition adapter; native blocks feed the dedicated detect stage."""
 from __future__ import annotations
 
 import asyncio

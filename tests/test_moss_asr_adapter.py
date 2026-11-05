@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 
+from modules.detect import create_detect_stage
 from modules.asr import create_asr, DocumentASRAdapter
 from modules.asr.moss_adapter import MossASRAdapter, merge_slice_blocks
 from modules.analysis_plugins import AnalysisPluginError
@@ -148,6 +149,47 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MossPipelineTests(unittest.TestCase):
+    def test_refined_blocks_are_the_only_llm_input_and_survive_cache_reload(self):
+        from modules.detect.moss_config import MossDetectConfig
+        from modules.detect.moss_stage import MossDetectStage
+        asr_client, align_client = Mock(), Mock()
+        asr_client.request.return_value = {"language": "ja", "timeline_source": "model", "blocks": [
+            {"index": 1, "start_ms": 0, "end_ms": 4000,
+             "text": "こんにちは。はい。", "speaker": "S01"}]}, 4000
+        align_client.request.return_value = {"words": [
+            {"text": "こんにちは", "start_ms": 0, "end_ms": 2000},
+            {"text": "はい", "start_ms": 2100, "end_ms": 3900}]}, 4000
+        received = []
+
+        def translate(blocks, config, *, preserve_source_timeline, output_dir):
+            self.assertTrue(preserve_source_timeline)
+            received.append([(b.text, b.start_ms, b.end_ms, b.speaker) for b in blocks])
+            return blocks, {"enabled": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "in.wav"
+            source.write_bytes(b"fixture")
+            output = Path(directory) / "work"
+            stage = MossDetectStage(MossDetectConfig(), str(source), client=align_client)
+            with patch("modules.asr.create_asr", return_value=MossASRAdapter(client=asr_client)), \
+                    patch("modules.vad.stage.run_analysis_stage", return_value=([SpeechRegion(10, 14)], None)), \
+                    patch("modules.detect.create_detect_stage", return_value=stage) as factory, \
+                    patch("modules.pipeline._create_japanese_cleaner_with_fallback") as cleaner, \
+                    patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
+                    redirect_stdout(StringIO()):
+                for _ in range(2):
+                    run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
+                        asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
+                        llm_kwargs={"provider": "test"})
+            self.assertIn("こんにちは。はい。", read_text(output / "asr_subtitles/raw.vtt"))
+            self.assertNotIn("こんにちは。はい。", read_text(output / "asr_subtitles/detected.vtt"))
+            factory.assert_called_once()
+            cleaner.assert_not_called()
+        expected = [("こんにちは。", 10000, 12000, "S01"), ("はい。", 12000, 14000, "S01")]
+        self.assertEqual(received, [expected, expected])
+        align_client.request.assert_called_once()
+        asr_client.request.assert_called_once()
+
     def test_moss_tag_reaches_llm_as_regular_text(self):
         client = Mock()
         client.request.return_value = {"language": "ja", "timeline_source": "model", "blocks": [
@@ -162,7 +204,7 @@ class MossPipelineTests(unittest.TestCase):
             source = Path(directory) / "input.wav"
             source.write_bytes(b"fixture")
             with patch("modules.asr.create_asr", return_value=MossASRAdapter(client=client)), \
-                    patch("modules.pipeline._run_vad_stage", return_value=[SpeechRegion(0, 1.3)]), \
+                    patch("modules.vad.stage.run_analysis_stage", return_value=([SpeechRegion(0, 1.3)], None)), \
                     patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
                     redirect_stdout(StringIO()):
                 run_pipeline(str(source), "", str(Path(directory) / "work"), tts_backend="subtitles-only",
@@ -170,7 +212,7 @@ class MossPipelineTests(unittest.TestCase):
                              llm_kwargs={"provider": "test"})
         self.assertEqual(received, ["[clear throat]"])
 
-    def test_vad_crops_reach_llm_and_cache_without_secondary_detection_or_cleanup(self):
+    def test_vad_crops_reach_moss_detect_llm_and_cache_without_cleanup(self):
         client = Mock()
         client.request.return_value = payload(), 1000
         adapter = MossASRAdapter(client=client)
@@ -187,10 +229,10 @@ class MossPipelineTests(unittest.TestCase):
             source.write_bytes(b"fixture")
             output = Path(directory) / "work"
             with patch("modules.asr.create_asr", return_value=adapter), \
-                    patch("modules.pipeline._run_vad_stage", return_value=[SpeechRegion(10, 11)]) as vad, \
+                    patch("modules.vad.stage.run_analysis_stage", return_value=([SpeechRegion(10, 11)], None)) as vad, \
                     patch("modules.pipeline._create_japanese_cleaner_with_fallback") as cleaner, \
                     patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
-                    patch("modules.detect.create_detect_stage") as detect, redirect_stdout(StringIO()):
+                    patch("modules.detect.create_detect_stage", wraps=create_detect_stage) as detect, redirect_stdout(StringIO()):
                 for _ in range(2):
                     result = run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
                         asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
@@ -200,7 +242,8 @@ class MossPipelineTests(unittest.TestCase):
                     self.assertEqual(result["blocks"][0].asr_slice.id, "moss-slice-000001")
                     self.assertIn("S01：こんにちは。", read_text(result["final_vtt"]))
             vad.assert_called_once()
-            detect.assert_not_called()
+            detect.assert_called_once()
+            self.assertEqual(detect.call_args.args[0].aligner, "moss-native")
             cleaner.assert_not_called()
             client.request.assert_called_once()
             self.assertEqual(preserved, [True, True])

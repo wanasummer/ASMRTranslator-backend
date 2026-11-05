@@ -1,6 +1,6 @@
 """Composition root for the replaceable detect stage."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .aligners import create_sentence_aligner
 from .atom_detectors import create_atom_detector
@@ -11,6 +11,16 @@ from .qwen_aligner import QwenForceAlignDetectStage
 from .qwen_config import QWEN_PIPELINE_VERSION
 from .sentence_detectors import create_sentence_detector
 from .stage import DefaultDetectStage
+from .moss_stage import MossDetectStage
+from .moss_config import MOSS_POLICY_VERSION
+
+
+def select_detect_config(config: DetectConfig, backend: str) -> DetectConfig:
+    """Native document backends select their own refinement policy."""
+    return replace(config, aligner=BACKEND_PIPELINES.get(backend, config.aligner))
+
+
+BACKEND_PIPELINES = {"moss-transcribe-diarize": "moss-native"}
 
 
 def _create_builtin_mecab_stage(config: DetectConfig, audio_path: str) -> DetectStage:
@@ -36,6 +46,7 @@ def _joint_cache_signature(config: DetectConfig) -> dict:
     settings = asdict(config)
     settings.pop("qwen")
     settings.pop("qwen_endpoint")
+    settings.pop("moss")
     signature = {"pipeline": "joint-vad", "version": 1, "settings": settings}
     if config.atom_detector == "asmr-vad":
         from ..vad.factory import resolve_vad_config
@@ -51,11 +62,14 @@ def _qwen_cache_signature(config: DetectConfig) -> dict:
 
 
 STAGE_FACTORIES = {
+    "moss-native": lambda config, audio_path: MossDetectStage(config.moss_settings(), audio_path),
     "joint-vad": _create_builtin_mecab_stage,
     "qwen-force-align": _create_qwen_force_align_stage,
 }
 
 CACHE_SIGNATURES = {
+    "moss-native": lambda config: {"pipeline": "moss-native", "version": MOSS_POLICY_VERSION,
+                                  "settings": asdict(config.moss_settings())},
     "joint-vad": _joint_cache_signature,
     "qwen-force-align": _qwen_cache_signature,
 }

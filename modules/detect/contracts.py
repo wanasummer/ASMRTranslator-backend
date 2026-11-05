@@ -5,6 +5,7 @@ from typing import Protocol, Sequence
 
 from ..vad.contracts import AsrSlice, VadRegion
 from .qwen_config import QwenConfig
+from .moss_config import MossDetectConfig
 
 
 class DetectError(RuntimeError):
@@ -158,7 +159,7 @@ class AlignmentDependencies:
 
 @dataclass(frozen=True)
 class DetectConfig:
-    """Stage selection plus legacy FSMN settings; Qwen owns its own policy."""
+    """Stage selection plus legacy FSMN settings; Qwen and MOSS own their policies."""
 
     sentence_detector: str = "mecab-japanese"
     aligner: str = "joint-vad"
@@ -185,6 +186,10 @@ class DetectConfig:
     vocalization_ratio: float = 0.72
     vocalization_run: int = 5
     qwen: QwenConfig | None = None
+    moss: MossDetectConfig | None = None
+
+    def moss_settings(self) -> MossDetectConfig:
+        return self.moss or MossDetectConfig(alignment_endpoint=self.qwen_endpoint)
 
     def qwen_settings(self) -> QwenConfig:
         """Adapt the legacy endpoint only; never inherit FSMN scoring knobs."""
