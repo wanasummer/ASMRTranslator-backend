@@ -142,8 +142,10 @@ def proportional_spans(start_ms: int, end_ms: int, parts: tuple[str, ...],
 
 class MossDetectStage:
     def __init__(self, config: MossDetectConfig, audio_path: str, *,
-                 client: WordAlignmentPort | None = None):
+                 client: WordAlignmentPort | None = None,
+                 recalibrate_client: WordAlignmentPort | None = None):
         self.config, self.audio_path, self.client = config, audio_path, client
+        self.recalibrate_client = recalibrate_client
 
     def _request_alignment(self, block) -> tuple[dict, int]:
         if self.client is not None:
@@ -181,6 +183,58 @@ class MossDetectStage:
                for start, end in zip(edges, edges[1:])):
             raise ValueError("sentence_too_short")
         return tuple(zip(edges, edges[1:]))
+
+    def _recalibrate_spans(self, block, parts: tuple[str, ...],
+                           spans: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+        recalibrate_client = self.recalibrate_client
+        if recalibrate_client is None and self.config.recalibrate_endpoint:
+            try:
+                recalibrate_client = AnalysisPluginClient(
+                    self.config.recalibrate_endpoint, "moss-transcribe-diarize", "moss-transcribe-diarize/1"
+                )
+            except Exception:
+                recalibrate_client = None
+
+        if recalibrate_client is None:
+            return spans
+
+        new_spans = []
+        for child_idx, (text, (start, end)) in enumerate(zip(parts, spans)):
+            duration = end - start
+            if duration < self.config.min_recalibrate_duration_ms:
+                new_spans.append((start, end))
+                continue
+
+            try:
+                body, _ = recalibrate_client.request(
+                    "/transcribe", self.audio_path, {"language": "ja"},
+                    start_ms=start, end_ms=end,
+                )
+                child_blocks = body.get("blocks", []) if isinstance(body, dict) else []
+                if not child_blocks:
+                    new_spans.append((start, end))
+                    continue
+
+                recal_text = "".join(b.get("text", "") for b in child_blocks)
+                if _lexical(recal_text) != _lexical(text):
+                    new_spans.append((start, end))
+                    continue
+
+                first_start_rel = child_blocks[0].get("start_ms", 0)
+                last_end_rel = child_blocks[-1].get("end_ms", duration)
+                cal_start = start + first_start_rel
+                cal_end = start + last_end_rel
+
+                if (cal_end - cal_start >= self.config.min_sentence_duration_ms
+                        and start <= cal_start < cal_end <= end):
+                    print(f"       [detect:moss] 二次微调句 {child_idx}: [{start}, {end}] -> [{cal_start}, {cal_end}]")
+                    new_spans.append((cal_start, cal_end))
+                else:
+                    new_spans.append((start, end))
+            except Exception:
+                new_spans.append((start, end))
+
+        return tuple(new_spans)
 
     def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
         write_detect_artifact(output_dir, "moss_detection_input.json", {
@@ -221,6 +275,8 @@ class MossDetectStage:
                         outcome = "aligned"
                         reason = None
                         method = "moss-native"
+                        if self.config.recalibrate:
+                            spans = self._recalibrate_spans(block, parts, spans)
                     else:
                         outcome = "fallback"
                         reason = "sentence_too_short"

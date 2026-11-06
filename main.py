@@ -262,6 +262,8 @@ Examples:
                         choices=["joint-vad", "qwen-force-align", "moss-native"],
                         help="Detect-stage pipeline (default: joint-vad; MOSS ASR requires moss-native)")
     parser.add_argument("--qwen-align-endpoint", default="http://127.0.0.1:8007")
+    parser.add_argument("--moss-recalibrate", action="store_true",
+                        help="Enable experimental secondary MOSS recalibration on long split sentences")
     parser.add_argument("--vad-backend", choices=["fsmn-vad", "asmr-vad"], default="fsmn-vad")
     parser.add_argument("--vad-endpoint", default="http://127.0.0.1:8006")
     parser.add_argument("--vad-threshold", type=float, default=0.5)
@@ -665,6 +667,7 @@ Examples:
         detect_enabled=args.detect_stage,
         sentence_aligner=args.sentence_aligner,
         qwen_align_endpoint=args.qwen_align_endpoint,
+        moss_recalibrate=args.moss_recalibrate,
         vad_backend=args.vad_backend,
         vad_endpoint=args.vad_endpoint,
         vad_threshold=args.vad_threshold,

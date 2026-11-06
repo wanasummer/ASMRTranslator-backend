@@ -107,3 +107,40 @@ class MossDetectTests(unittest.TestCase):
             validate_detect_selection(DetectConfig(aligner="moss-native"), "common-asr")
         with self.assertRaisesRegex(DetectError, "DETECT_IMPLEMENTATION_UNKNOWN"):
             validate_detect_selection(DetectConfig(aligner="unknown"), "fish-asr")
+
+    def test_recalibration_tightens_child_bounds_when_text_matches_and_skips_short(self):
+        recal_client = Mock()
+        # Relative crop 0-2857ms returns relative 100-2600ms
+        recal_client.request.return_value = ({"blocks": [
+            {"text": "こんにちは。", "start_ms": 100, "end_ms": 2600, "speaker": "S02"}
+        ]}, 2857)
+
+        cfg = MossDetectConfig(recalibrate=True, min_recalibrate_duration_ms=1500)
+        stage = MossDetectStage(cfg, "in.wav", recalibrate_client=recal_client)
+        with tempfile.TemporaryDirectory() as directory:
+            result = stage.run(DetectStageInput((self.block,)), directory)
+
+        self.assertEqual(len(result.blocks), 2)
+        # Child 0 duration >= 1500ms got recalibrated from 2000 to 2000+100=2100, and end=2000+2600=4600
+        self.assertEqual(result.blocks[0].start_ms, 2100)
+        self.assertEqual(result.blocks[0].end_ms, 4600)
+        # Original speaker "S01" must NOT be overwritten by recalibration's "S02"!
+        self.assertEqual(result.blocks[0].speaker, "S01")
+        # Lineage preserved
+        self.assertTrue(result.blocks[0].aligned_sentence.source_block_id)
+
+        # Child 1 (< 1500ms) was skipped for recalibration
+        self.assertEqual(recal_client.request.call_count, 1)
+
+    def test_recalibration_falls_back_on_mismatch_or_error(self):
+        recal_client = Mock()
+        recal_client.request.side_effect = AnalysisPluginError("502 Bad Gateway")
+
+        cfg = MossDetectConfig(recalibrate=True, min_recalibrate_duration_ms=1500)
+        stage = MossDetectStage(cfg, "in.wav", recalibrate_client=recal_client)
+        with tempfile.TemporaryDirectory() as directory:
+            result = stage.run(DetectStageInput((self.block,)), directory)
+
+        self.assertEqual(len(result.blocks), 2)
+        # Safely falls back to energy/mora bounds without crashing
+        self.assertEqual(result.blocks[0].start_ms, 2000)

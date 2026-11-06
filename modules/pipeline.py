@@ -419,6 +419,7 @@ def run_pipeline(
     sentence_detector: str = "mecab-japanese",
     detect_enabled: Optional[bool] = None,
     skip_short_translations: bool = True,
+    moss_recalibrate: bool = False,
 ) -> dict:
     from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature, validate_detect_selection
     from .vad.stage import run_analysis_stage
@@ -429,7 +430,9 @@ def run_pipeline(
     detect_config = DetectConfig(aligner=sentence_aligner, qwen_endpoint=qwen_align_endpoint,
                                  atom_detector=atom_detector_for_backend(vad_backend),
                                  vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
-                                 sentence_detector=sentence_detector)
+                                 sentence_detector=sentence_detector,
+                                 moss_recalibrate=moss_recalibrate,
+                                 moss_endpoint=(asr_kwargs or {}).get("endpoint"))
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
     detect_enabled = detect_eligible(
         detect_enabled, vtt_path, asr_backend,

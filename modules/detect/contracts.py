@@ -187,9 +187,15 @@ class DetectConfig:
     vocalization_run: int = 5
     qwen: QwenConfig | None = None
     moss: MossDetectConfig | None = None
+    moss_recalibrate: bool = False
+    moss_endpoint: str | None = None
 
     def moss_settings(self) -> MossDetectConfig:
-        return self.moss or MossDetectConfig(min_sentence_duration_ms=self.min_sentence_duration_ms)
+        return self.moss or MossDetectConfig(
+            min_sentence_duration_ms=self.min_sentence_duration_ms,
+            recalibrate=self.moss_recalibrate,
+            recalibrate_endpoint=self.moss_endpoint,
+        )
 
     def qwen_settings(self) -> QwenConfig:
         """Adapt the legacy endpoint only; never inherit FSMN scoring knobs."""
