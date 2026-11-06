@@ -23,10 +23,10 @@ def detect_eligible(
     project_vad=True,
     sentence_aligner="joint-vad",
 ):
-    # MOSS native refinement is part of its normal ASR contract, independent of
-    # the experimental switch selecting the other Japanese detect pipelines.
+    # Every backend, including MOSS with its dedicated pipeline, runs detect
+    # only when the user selects it.
     return bool(
-        (enabled or backend == "moss-transcribe-diarize")
+        enabled
         and not subtitle_path
         and language == "ja"
     )

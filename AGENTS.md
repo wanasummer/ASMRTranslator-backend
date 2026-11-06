@@ -38,7 +38,10 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
 - Include the selected intermediate pipeline's effective settings and policy
   version in its cache identity when changing its behavior.
 - MOSS consumes project VAD slices sequentially and returns native ASR blocks.
-  Its dedicated `moss-native` detect stage refines only within each native block,
+  Detect is user-selected for every backend. MOSS may select only its dedicated
+  `moss-native` detect stage, which no other backend may select; the factory
+  validates the pairing. Without detect, native blocks go straight to the LLM.
+  `moss-native` refines only within each native block,
   preserving outer timestamps, VAD lineage, overlapping speakers, and exact text.
   Punctuation owns candidate boundaries; Qwen word alignment supplies internal
   timestamps only when splitting is needed. Do not route MOSS through the Qwen

@@ -1,8 +1,9 @@
 """Refine native MOSS blocks without crossing their timestamps or speakers.
 
-Punctuation owns text boundaries. An injected word-alignment port supplies only
-internal times; unavailable or ambiguous alignment retains the native block.
-Inputs are never mutated, including overlapping turns sharing one VAD slice.
+Punctuation owns text boundaries. When an external word-alignment port is
+injected, it supplies internal times; in standard operation, native Japanese
+mora-proportional subdivision with acoustic energy refinement splits multi-sentence
+blocks without external network dependencies. Inputs are never mutated.
 """
 from dataclasses import asdict, replace
 import re
@@ -12,8 +13,7 @@ from typing import Protocol
 from ..analysis_plugins import AnalysisPluginClient, AnalysisPluginError, validate_timeline
 from .artifacts import write_detect_artifact
 from .contracts import AlignedSentenceBlock, DetectStageInput, DetectStageResult
-
-
+from .duration import count_japanese_mora
 from .moss_config import MOSS_POLICY_VERSION, MossDetectConfig
 
 
@@ -52,17 +52,111 @@ def native_sentences(text: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _refine_boundary_by_energy(audio_path: str, start_ms: int, end_ms: int,
+                               target_ms: int, search_window_ms: int = 250) -> int:
+    """Find the local acoustic energy minimum (pause/breath valley) around target_ms."""
+    try:
+        import struct, wave
+        with wave.open(audio_path, "rb") as wf:
+            framerate = wf.getframerate()
+            nchannels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            if sampwidth != 2:
+                return target_ms
+            scan_start_ms = max(start_ms + 100, target_ms - search_window_ms)
+            scan_end_ms = min(end_ms - 100, target_ms + search_window_ms)
+            if scan_end_ms <= scan_start_ms:
+                return target_ms
+            start_frame = int(scan_start_ms * framerate / 1000)
+            num_frames = int((scan_end_ms - scan_start_ms) * framerate / 1000)
+            wf.setpos(start_frame)
+            raw = wf.readframes(num_frames)
+            total_samples = len(raw) // (2 * nchannels)
+            win_size = int(0.020 * framerate)  # 20ms sliding window
+            step = int(0.005 * framerate)       # 5ms step
+            if win_size >= total_samples or total_samples <= 0:
+                return target_ms
+            fmt = f"<{total_samples * nchannels}h"
+            data = struct.unpack(fmt, raw)
+            mono = [data[i * nchannels] for i in range(total_samples)]
+
+            min_rms = float("inf")
+            rms_list = []
+            for offset in range(0, total_samples - win_size, step):
+                window = mono[offset : offset + win_size]
+                rms = sum(s * s for s in window) / win_size
+                rms_list.append((offset, rms))
+                if rms < min_rms:
+                    min_rms = rms
+
+            threshold = min_rms * 1.05 + 1e-6
+            valley_offsets = [offset + win_size // 2 for offset, rms in rms_list if rms <= threshold]
+            if not valley_offsets:
+                return target_ms
+            mid_offset = (valley_offsets[0] + valley_offsets[-1]) // 2
+            return scan_start_ms + int(mid_offset * 1000 / framerate)
+    except Exception:
+        return target_ms
+
+
+def proportional_spans(start_ms: int, end_ms: int, parts: tuple[str, ...],
+                       min_duration: int = 280,
+                       audio_path: str | None = None) -> tuple[tuple[int, int], ...]:
+    """Divide a multi-sentence duration proportionally by Japanese mora units with acoustic energy refinement."""
+    n = len(parts)
+    if n <= 1:
+        return ((start_ms, end_ms),)
+    total_duration = end_ms - start_ms
+    if total_duration < n * min_duration:
+        return ()
+
+    weights = []
+    for part in parts:
+        mora = count_japanese_mora("", part)
+        if mora <= 0:
+            mora = max(1.0, float(len(_lexical(part))))
+        weights.append(mora)
+
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        total_weight = float(n)
+        weights = [1.0] * n
+
+    edges = [start_ms]
+    accumulated_weight = 0.0
+    for i in range(n - 1):
+        accumulated_weight += weights[i]
+        target = start_ms + round(total_duration * (accumulated_weight / total_weight))
+        min_bound = edges[-1] + min_duration
+        max_bound = end_ms - (n - 1 - i) * min_duration
+        if audio_path and max_bound > min_bound:
+            refined = _refine_boundary_by_energy(audio_path, edges[-1], end_ms, target)
+            target = max(min_bound, min(refined, max_bound))
+        else:
+            target = max(min_bound, min(target, max_bound))
+        edges.append(target)
+    edges.append(end_ms)
+
+    return tuple(zip(edges, edges[1:]))
+
+
 class MossDetectStage:
     def __init__(self, config: MossDetectConfig, audio_path: str, *,
                  client: WordAlignmentPort | None = None):
         self.config, self.audio_path, self.client = config, audio_path, client
 
     def _request_alignment(self, block) -> tuple[dict, int]:
-        client = self.client or AnalysisPluginClient(
-            self.config.alignment_endpoint, "qwen-force-align", "qwen-force-align/1")
-        return client.request("/align", self.audio_path,
-            {"text": block.text, "language": "Japanese"},
-            start_ms=block.start_ms, end_ms=block.end_ms)
+        if self.client is not None:
+            return self.client.request("/align", self.audio_path,
+                {"text": block.text, "language": "Japanese"},
+                start_ms=block.start_ms, end_ms=block.end_ms)
+        if self.config.alignment_endpoint:
+            client = AnalysisPluginClient(
+                self.config.alignment_endpoint, "qwen-force-align", "qwen-force-align/1")
+            return client.request("/align", self.audio_path,
+                {"text": block.text, "language": "Japanese"},
+                start_ms=block.start_ms, end_ms=block.end_ms)
+        raise ValueError("no_alignment_endpoint")
 
     def _spans(self, block, parts, body: dict, duration: int) -> tuple[tuple[int, int], ...]:
         if abs(duration - (block.end_ms - block.start_ms)) > 1:
@@ -98,19 +192,39 @@ class MossDetectStage:
         for position, block in enumerate(value.asr_blocks):
             parts = native_sentences(block.text)
             outcome, reason, spans = "exact", None, ()
+            method = "moss-native"
             if block.skip_tts:
                 outcome = "bypassed"
             elif len(parts) > 1:
-                try:
-                    body, duration = self._request_alignment(block)
-                    write_detect_artifact(output_dir, f"moss_alignment_raw_{position}.json", {
-                        "blockIndex": block.index, "durationMs": duration, "response": body})
-                    spans = self._spans(block, parts, body, duration)
-                    outcome = "aligned"
-                except (AnalysisPluginError, ValueError, TypeError, KeyError) as error:
-                    outcome = "fallback"
-                    reason = getattr(error, "code", str(error))
-                    print(f"       [detect:moss] 块 {block.index} 对齐失败，保留原块（{reason}）")
+                if self.client is not None or self.config.alignment_endpoint:
+                    try:
+                        body, duration = self._request_alignment(block)
+                        write_detect_artifact(output_dir, f"moss_alignment_raw_{position}.json", {
+                            "blockIndex": block.index, "durationMs": duration, "response": body})
+                        spans = self._spans(block, parts, body, duration)
+                        outcome = "aligned"
+                        method = "moss-native-word-align"
+                    except (AnalysisPluginError, ValueError, TypeError, KeyError) as error:
+                        if self.client is not None:
+                            outcome = "fallback"
+                            reason = getattr(error, "code", str(error))
+                            print(f"       [detect:moss] 块 {block.index} 对齐失败，保留原块（{reason}）")
+                        else:
+                            outcome = "fallback"
+                            reason = getattr(error, "code", str(error))
+
+                if outcome != "aligned" and self.client is None:
+                    spans = proportional_spans(block.start_ms, block.end_ms, parts,
+                                               self.config.min_sentence_duration_ms,
+                                               audio_path=self.audio_path)
+                    if spans:
+                        outcome = "aligned"
+                        reason = None
+                        method = "moss-native"
+                    else:
+                        outcome = "fallback"
+                        reason = "sentence_too_short"
+
             summary[outcome + "Slices"] += 1
             summary["eligibleSlices"] += outcome != "bypassed"
             source_id = f"{block.asr_slice.id if block.asr_slice else 'moss'}:block:{position}:{block.index}"
@@ -121,7 +235,7 @@ class MossDetectStage:
                     aligned = AlignedSentenceBlock(
                         f"{source_id}:sentence:{child}", source_id, start, end, text,
                         block.asr_slice.region_ids if block.asr_slice else (),
-                        "moss-native-word-align", "high", "sentence",
+                        method, "high", "sentence",
                         block.start_ms, block.end_ms)
                     output.append(replace(block, index=len(output), start_ms=start, end_ms=end,
                         text=text, source_text=text, cleaned_source_text="", aligned_sentence=aligned,
@@ -133,5 +247,5 @@ class MossDetectStage:
             "policyVersion": MOSS_POLICY_VERSION, "config": self.config,
             "summary": summary, "records": records, "blocks": output})
         print(f"       [detect:moss] 细分 {summary['alignedSlices']} 块，"
-              f"回退 {summary['fallbackSlices']} 块，输出 {len(output)} 句")
+              f"单句 {summary['exactSlices']} 块，回退 {summary['fallbackSlices']} 块，输出 {len(output)} 句")
         return DetectStageResult(tuple(output), summary)

@@ -189,7 +189,7 @@ class DetectConfig:
     moss: MossDetectConfig | None = None
 
     def moss_settings(self) -> MossDetectConfig:
-        return self.moss or MossDetectConfig(alignment_endpoint=self.qwen_endpoint)
+        return self.moss or MossDetectConfig(min_sentence_duration_ms=self.min_sentence_duration_ms)
 
     def qwen_settings(self) -> QwenConfig:
         """Adapt the legacy endpoint only; never inherit FSMN scoring knobs."""

@@ -180,7 +180,7 @@ class MossPipelineTests(unittest.TestCase):
                 for _ in range(2):
                     run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
                         asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
-                        llm_kwargs={"provider": "test"})
+                        detect_enabled=True, sentence_aligner="moss-native", llm_kwargs={"provider": "test"})
             self.assertIn("こんにちは。はい。", read_text(output / "asr_subtitles/raw.vtt"))
             self.assertNotIn("こんにちは。はい。", read_text(output / "asr_subtitles/detected.vtt"))
             factory.assert_called_once()
@@ -209,8 +209,47 @@ class MossPipelineTests(unittest.TestCase):
                     redirect_stdout(StringIO()):
                 run_pipeline(str(source), "", str(Path(directory) / "work"), tts_backend="subtitles-only",
                              asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
-                             llm_kwargs={"provider": "test"})
+                             detect_enabled=True, sentence_aligner="moss-native", llm_kwargs={"provider": "test"})
         self.assertEqual(received, ["[clear throat]"])
+
+    def test_moss_without_selected_detect_sends_native_blocks_to_llm(self):
+        client = Mock()
+        client.request.return_value = {"language": "ja", "timeline_source": "model", "blocks": [
+            {"index": 1, "start_ms": 0, "end_ms": 4000, "text": "こんにちは。はい。", "speaker": "S01"}]}, 4000
+        received = []
+
+        def translate(blocks, config, *, preserve_source_timeline, output_dir):
+            received.extend((block.text, block.start_ms, block.end_ms) for block in blocks)
+            return blocks, {"enabled": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.wav"
+            source.write_bytes(b"fixture")
+            output = Path(directory) / "work"
+            with patch("modules.asr.create_asr", return_value=MossASRAdapter(client=client)), \
+                    patch("modules.pipeline._run_vad_stage", return_value=[SpeechRegion(10, 14)]), \
+                    patch("modules.detect.create_detect_stage") as detect, \
+                    patch("modules.pipeline._create_japanese_cleaner_with_fallback") as cleaner, \
+                    patch("modules.subtitle_processing.create_subtitle_stage", side_effect=subtitle_stage_factory(translate)), \
+                    redirect_stdout(StringIO()):
+                run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
+                             asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
+                             detect_enabled=False, sentence_aligner="moss-native", llm_kwargs={"provider": "test"})
+            self.assertFalse(contains(output / "asr_subtitles/detected.vtt"))
+        detect.assert_not_called()
+        cleaner.assert_not_called()
+        self.assertEqual(received, [("こんにちは。はい。", 10000, 14000)])
+
+    def test_moss_accepts_all_detect_pipelines_and_generic_backends_reject_moss_native(self):
+        from modules.detect import DetectConfig, DetectError, validate_detect_selection
+        for aligner in ("moss-native", "joint-vad", "qwen-force-align"):
+            with self.subTest(aligner=aligner):
+                cfg = DetectConfig(aligner=aligner)
+                validated = validate_detect_selection(cfg, "moss-transcribe-diarize")
+                self.assertEqual(validated.aligner, aligner)
+
+        with self.assertRaisesRegex(DetectError, "DETECT_BACKEND_INCOMPATIBLE"):
+            validate_detect_selection(DetectConfig(aligner="moss-native"), "fish-asr")
 
     def test_vad_crops_reach_moss_detect_llm_and_cache_without_cleanup(self):
         client = Mock()
@@ -236,7 +275,8 @@ class MossPipelineTests(unittest.TestCase):
                 for _ in range(2):
                     result = run_pipeline(str(source), "", str(output), tts_backend="subtitles-only",
                         asr_backend="moss-transcribe-diarize", asr_kwargs={"endpoint": "http://plugin"},
-                        japanese_cleaner="regex-only", detect_enabled=True, llm_kwargs={"provider": "test"})
+                        japanese_cleaner="regex-only", detect_enabled=True, sentence_aligner="moss-native",
+                        llm_kwargs={"provider": "test"})
                     self.assertEqual([block.speaker for block in result["blocks"]], ["S01", "S02"])
                     self.assertEqual(result["blocks"][0].start_ms, 10000)
                     self.assertEqual(result["blocks"][0].asr_slice.id, "moss-slice-000001")

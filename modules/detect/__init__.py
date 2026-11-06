@@ -1,9 +1,11 @@
 """Japanese sentence detection and audio alignment before cleanup/translation."""
 
 from .contracts import DetectConfig, DetectError, DetectStageResult
-from .factory import create_detect_stage, detect_cache_signature, select_detect_config
+from .factory import (create_detect_stage, detect_cache_signature,
+                      detect_pipeline_supports, validate_detect_selection)
 from .qwen_config import QwenConfig
 from .stage import detect_eligible
 
 __all__ = ["DetectConfig", "DetectError", "DetectStageResult",
-           "create_detect_stage", "detect_eligible", "detect_cache_signature", "select_detect_config", "QwenConfig"]
+           "create_detect_stage", "detect_eligible", "detect_cache_signature",
+           "detect_pipeline_supports", "validate_detect_selection", "QwenConfig"]

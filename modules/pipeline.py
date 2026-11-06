@@ -420,7 +420,7 @@ def run_pipeline(
     detect_enabled: Optional[bool] = None,
     skip_short_translations: bool = True,
 ) -> dict:
-    from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature, select_detect_config
+    from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature, validate_detect_selection
     from .vad.stage import run_analysis_stage
     from .vad.factory import resolve_vad_config
     from .detect.atom_detectors import atom_detector_for_backend
@@ -430,13 +430,14 @@ def run_pipeline(
                                  atom_detector=atom_detector_for_backend(vad_backend),
                                  vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
                                  sentence_detector=sentence_detector)
-    detect_config = select_detect_config(detect_config, asr_backend)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
     detect_enabled = detect_eligible(
         detect_enabled, vtt_path, asr_backend,
         (asr_kwargs or {}).get("output_language", (asr_kwargs or {}).get("language", "ja")),
         sentence_aligner=sentence_aligner,
     )
+    if detect_enabled:
+        detect_config = validate_detect_selection(detect_config, asr_backend)
     detect_stage = None
     detect_summary = None
     output_dir = os.path.abspath(output_dir)

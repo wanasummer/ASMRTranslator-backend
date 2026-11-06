@@ -1,6 +1,6 @@
 """Composition root for the replaceable detect stage."""
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 from .aligners import create_sentence_aligner
 from .atom_detectors import create_atom_detector
@@ -15,12 +15,17 @@ from .moss_stage import MossDetectStage
 from .moss_config import MOSS_POLICY_VERSION
 
 
-def select_detect_config(config: DetectConfig, backend: str) -> DetectConfig:
-    """Native document backends select their own refinement policy."""
-    return replace(config, aligner=BACKEND_PIPELINES.get(backend, config.aligner))
+# Native document backends own a dedicated detect pipeline. The user still
+# chooses whether detect runs; when it does, their blocks never enter the
+# generic pipelines and dedicated pipelines never receive other backends' blocks.
+DEDICATED_PIPELINES = {"moss-transcribe-diarize": "moss-native"}
 
 
-BACKEND_PIPELINES = {"moss-transcribe-diarize": "moss-native"}
+def detect_pipeline_supports(aligner: str, backend: str) -> bool:
+    """moss-native is exclusive to MOSS; MOSS defaults to moss-native but supports generic aligners."""
+    if aligner == "moss-native":
+        return backend == "moss-transcribe-diarize"
+    return True
 
 
 def _create_builtin_mecab_stage(config: DetectConfig, audio_path: str) -> DetectStage:
@@ -73,6 +78,19 @@ CACHE_SIGNATURES = {
     "joint-vad": _joint_cache_signature,
     "qwen-force-align": _qwen_cache_signature,
 }
+
+
+def validate_detect_selection(config: DetectConfig, backend: str) -> DetectConfig:
+    """Reject a user-selected detect pipeline that the ASR backend cannot feed."""
+    if config.aligner not in STAGE_FACTORIES:
+        raise DetectError("DETECT_IMPLEMENTATION_UNKNOWN",
+                          f"Unknown sentence aligner: {config.aligner}")
+    if not detect_pipeline_supports(config.aligner, backend):
+        raise DetectError(
+            "DETECT_BACKEND_INCOMPATIBLE",
+            f"Detect pipeline {config.aligner} does not support ASR backend {backend}",
+        )
+    return config
 
 
 def detect_cache_signature(config: DetectConfig) -> dict:
