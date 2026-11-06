@@ -35,6 +35,20 @@ class PipelineArtifactCleanupTest(unittest.TestCase):
             self.assertFalse(contains(Path(directory) / 'llm_subtitles/final.vtt'))
             self.assertFalse(audio.exists())
 
+    def test_repeat_run_drops_previous_voice_assets_and_tempo_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initialize_project(directory)
+            tts = Path(directory) / 'chunk_0/02_tts'
+            tts.mkdir(parents=True)
+            voice, raw = tts / 'voice_0003.wav', tts / 'tts_0003.mp3'
+            voice.write_bytes(b'voice')
+            raw.write_bytes(b'raw')
+            save_text(tts / 'tts_tempo_0003.json', '{"rate": 1.2}')
+            self.assertEqual(_clean_previous_run(directory), 1)
+            self.assertFalse(voice.exists())
+            self.assertTrue(raw.exists())
+            self.assertFalse(contains(tts / 'tts_tempo_0003.json'))
+
     def test_language_specific_stage_boundaries_are_loaded_without_subtitle_files(self):
         for language, name, text in [('ja','cleaned.vtt','テスト'),('zh','raw.vtt','测试')]:
             with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:

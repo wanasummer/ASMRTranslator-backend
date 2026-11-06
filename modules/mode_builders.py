@@ -37,6 +37,11 @@ class SegmentBuilder(ABC):
 
     wav_params: list[str] | None = None
 
+    @property
+    def timeline_render(self) -> bool:
+        """True when the final mix is the studio arrangement of the untouched draft."""
+        return False
+
     @abstractmethod
     def export_settings(self) -> BuilderExportSettings:
         """Factory configuration sufficient to rebuild from native source slices."""
@@ -99,6 +104,10 @@ class SyncBuilder(SegmentBuilder):
         self.sync_mode = sync_mode
         self.follow_original_rate = follow_original_rate
 
+    @property
+    def timeline_render(self) -> bool:
+        return self.sync_mode == "follow_original"
+
     def build(self, segments, output_dir, max_workers=4):
         return build_sync_segments(segments, output_dir,
                                    sync_mode=self.sync_mode,
@@ -128,6 +137,10 @@ class PhantomBuilder(SegmentBuilder):
         self.orig_fade_ms = orig_fade_ms
         self.tts_fade_ms = tts_fade_ms
         self.virtual_fade = virtual_fade
+
+    @property
+    def timeline_render(self) -> bool:
+        return self.sync_mode == "follow_original"
 
     def build(self, segments, output_dir, max_workers=4):
         return build_phantom_segments(

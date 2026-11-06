@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from modules.arrangement import (ArrangementError, initial_state, load_state, save_state,
                                  optimize_subtitles, synthesize_edit, prepare_arrangement_plan,
                                  resolve_replacement, run_editor_request, optimize_fragment,
-                                 pipeline_tts_rates)
+                                 pipeline_tts_rates, fit_default_placement, tts_max_rate)
 from modules.arrangement_audio import ArrangementPlan, ArrangementAudioResult, PydubArrangementAdapter, perceived_db, write_arrangement_result
 from modules.arrangement_contracts import ArrangedClip
 from modules.llm import LLMConfig
@@ -45,7 +45,7 @@ class ArrangementTests(unittest.TestCase):
             plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
         self.assertEqual([(clip.start_ms, clip.end_ms) for clip in plan.clips], [(0, 2000), (2000, 3667)])
 
-    def test_long_default_voice_keeps_next_sentence_start_and_complete_source(self):
+    def test_long_default_voice_keeps_next_sentence_start_and_truncates_at_max_rate(self):
         cache = self.work / "chunk_0/02_tts"
         cache.mkdir(parents=True)
         for position in range(2):
@@ -53,9 +53,41 @@ class ArrangementTests(unittest.TestCase):
         with patch("pydub.AudioSegment.from_file", side_effect=[
             MagicMock(__len__=lambda _: 8000), MagicMock(__len__=lambda _: 1000)
         ]):
-            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state,
+                                            {"followOriginalRate": 1.2}, {})
         self.assertEqual([(clip.start_ms, clip.end_ms) for clip in plan.clips], [(0, 2000), (2000, 3000)])
-        self.assertEqual(plan.clips[0].sample_end_ms, 8000)
+        self.assertEqual((plan.clips[0].sample_start_ms, plan.clips[0].sample_end_ms), (0, 2400))
+
+    def test_truncated_default_voice_lands_at_estimated_speech_pace(self):
+        self.rows[1]["start_ms"], self.rows[1]["end_ms"] = 6000, 7000
+        self.rows[0]["text"] = "一二三四五六七八九十"
+        self.rows[0]["end_ms"] = 2000
+        save_text(self.work / "debug/_parsed_vtt.json", json.dumps(self.rows, ensure_ascii=False))
+        self.state = initial_state(self.work)
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        for position in range(2):
+            (cache / f"tts_{position:04d}.wav").touch()
+        with patch("pydub.AudioSegment.from_file", side_effect=[
+            MagicMock(__len__=lambda _: 10000), MagicMock(__len__=lambda _: 1000)
+        ]):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state,
+                                            {"followOriginalRate": 1.2}, {})
+        self.assertEqual((plan.clips[0].start_ms, plan.clips[0].end_ms), (0, 3125))
+        self.assertEqual(plan.clips[0].sample_end_ms, 3750)
+
+    def test_default_placement_caps_rate_and_keeps_fitting_voices_whole(self):
+        self.assertEqual(fit_default_placement(0, 2000, 3000, 1, 1.15), (2000, 2000))
+        self.assertEqual(fit_default_placement(0, 2200, 2000, 1, 1.15), (2000, 2200))
+        self.assertEqual(fit_default_placement(0, 8000, 2000, 1, 1.15), (2000, 2300))
+        self.assertEqual(fit_default_placement(0, 8000, 2000, 1.25, 1.1), (2000, 2500))
+        self.assertEqual(fit_default_placement(0, 8000, None, 1.25, 1.1), (6400, 8000))
+        self.assertEqual(fit_default_placement(0, 10000, 6000, 1, 1.2, landing=3125), (3125, 3750))
+        self.assertEqual(fit_default_placement(0, 7000, 6000, 1, 1.2, landing=3125), (6000, 7000))
+        self.assertEqual(fit_default_placement(0, 10000, 6000, 1, 1.2, landing=7000), (6000, 7200))
+        self.assertEqual(tts_max_rate({}), 1.15)
+        self.assertEqual(tts_max_rate({"followOriginalRate": 3}), 1.25)
+        self.assertEqual(tts_max_rate({"followOriginalRate": "bad"}), 1.15)
 
     def test_render_accelerates_complete_voice_beyond_two_times(self):
         from array import array

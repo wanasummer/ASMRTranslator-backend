@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .arrangement_repository import ArrangementRepository, create_arrangement_repository
 from .arrangement_contracts import ArrangementError, ArrangementState, ArrangementPlan, ArrangedClip
+from .speech_pace import landing_hint_ms
 from .storage import save_json, read_bytes, read_json, address
 from .llm import LLMConfig, is_configured
 from .subtitle_processing.editor import create_subtitle_editor
@@ -150,13 +151,16 @@ def resolve_replacement(work: Path, relative: str) -> Path:
     return path
 
 
+def voice_asset_path(work: Path, position: int) -> Path:
+    """The processed (artifact-checked, mode-DSP) voice that the timeline renders."""
+    return work / f"chunk_0/02_tts/voice_{position:04d}.wav"
+
+
 def cached_tts(work: Path, position: int) -> Path | None:
-    # Matches the existing studio audio cache contract; never confuse index with position.
-    for extension in ("mp3", "wav"):
-        path = work / f"chunk_0/02_tts/tts_{position:04d}.{extension}"
-        if path.is_file():
-            return path
-    return None
+    # Matches the studio audio track lookup order; never confuse index with position.
+    candidates = (voice_asset_path(work, position),
+                  *(work / f"chunk_0/02_tts/tts_{position:04d}.{extension}" for extension in ("mp3", "wav")))
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def pipeline_tts_rates(work: Path) -> dict[int, float]:
@@ -169,6 +173,45 @@ def pipeline_tts_rates(work: Path) -> dict[int, float]:
         if math.isfinite(rate) and rate > 0:
             rates[index] = rate
     return rates
+
+
+def tts_volume(config: dict) -> float:
+    """The user's TTS volume, the same multiplier the pipeline applies to every voice."""
+    try:
+        value = float(config.get("ttsVolume", 1))
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.0, min(2.0, value)) if math.isfinite(value) else 1.0
+
+
+def tts_max_rate(config: dict) -> float:
+    """The user's "最大加速倍率", clamped to the same range as the pipeline."""
+    try:
+        value = float(config.get("followOriginalRate", 1.15))
+    except (TypeError, ValueError):
+        return 1.15
+    return max(1.0, min(1.25, value)) if math.isfinite(value) else 1.15
+
+
+def fit_default_placement(start: int, sample_length: int, upper: float | None,
+                          natural_rate: float, max_rate: float,
+                          landing: int | None = None) -> tuple[int, int]:
+    """Return ``(end_ms, kept_sample_ms)`` for an unedited voice starting at ``start``.
+
+    The voice plays at ``natural_rate``; when that would reach ``upper`` it is
+    sped up to at most ``max(max_rate, natural_rate)``. If it still does not
+    fit, it ends at ``landing`` (bounded by ``upper``) and only the leading part
+    that fits at the capped rate is kept.
+    """
+    end = start + round(sample_length / natural_rate)
+    if upper is None or not start < upper < end:
+        return end, sample_length
+    cap = max(1.0, max_rate, natural_rate)
+    room = round(upper) - start
+    if sample_length / room > cap and landing is not None and start < landing < upper:
+        room = landing - start
+    rate = min(sample_length / room, cap)
+    return start + room, min(sample_length, round(room * rate))
 
 
 def create_optimizer(config: dict) -> SubtitleOptimizer:
@@ -302,6 +345,8 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
     validate_state(work, state)
     rows, _ = read_baseline(work)
     pipeline_rates = pipeline_tts_rates(work)
+    max_rate = tts_max_rate(config)
+    voice_volume = tts_volume(config)
     clips = []
     reused = replaced = 0
     previous_end = -math.inf
@@ -333,7 +378,6 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
             raise ArrangementError(f"片段 {baseline['index']} 的 TTS 取样超出音频范围")
         if interval is None:
             start = baseline["start_ms"]
-            end = start + round((sample_end - sample_start) / pipeline_rates.get(baseline["index"], 1))
             next_sentence_start = next(
                 (
                     round(later["interval"]["start"] if later.get("interval") is not None else later_baseline["start_ms"])
@@ -342,8 +386,10 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
                 ),
                 None,
             )
-            if next_sentence_start is not None and start < next_sentence_start < end:
-                end = next_sentence_start
+            end, kept = fit_default_placement(start, sample_end - sample_start, next_sentence_start,
+                                              pipeline_rates.get(baseline["index"], 1), max_rate,
+                                              landing_hint_ms(edit["text"], baseline["start_ms"], baseline["end_ms"]))
+            sample_end = sample_start + kept
         else:
             start, end = round(interval["start"]), round(interval["end"])
         if start < previous_end:
@@ -351,7 +397,7 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
         if not clips and end < -5000:
             raise ArrangementError("首段 TTS 与原声的间隔不能超过 5 秒")
         previous_end = end
-        volume = edit["volume"] * state["globalVolume"]
+        volume = edit["volume"] * state["globalVolume"] * voice_volume
         reference = edit.get("originalInterval") or baseline
         clips.append(ArrangedClip(baseline["index"], start, end, edit["text"], path, volume,
                                   round(reference.get("start", reference.get("start_ms"))),

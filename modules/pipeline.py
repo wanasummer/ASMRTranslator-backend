@@ -78,9 +78,13 @@ def _clean_previous_run(output_dir: str) -> int:
     """Invalidate published documents and audio, preserving content-addressed caches."""
     for name in ("debug/_parsed_vtt.json", "llm_subtitles/final.vtt", "debug/high_quality_export.json"):
         delete_document(Path(output_dir) / name)
+    tts_dir = Path(output_dir) / "chunk_0/02_tts"
+    target = address(tts_dir / "tts_tempo_")
+    for key in target.store.keys(target.scope, target.key):
+        target.store.delete(target.scope, key)
     removed = 0
-    for name in ("output.wav", "output.mp3"):
-        path = Path(output_dir) / name
+    for path in [Path(output_dir) / "output.wav", Path(output_dir) / "output.mp3",
+                 *tts_dir.glob("voice_*.wav")]:
         if path.is_file():
             path.unlink()
             removed += 1
@@ -830,32 +834,34 @@ def run_pipeline(
             os.path.join(work_dir, "02_tts"),
             max_workers=pool_cfg.build_workers,
         )
-        segments = _required_stage("AUDIO_DSP_FAILED", align_tts_to_original,
-            segments, tts_volume=tts_volume, max_workers=pool_cfg.build_workers
-        )
-        segments = _required_stage("AUDIO_DSP_FAILED", enforce_tts_budget,
-            segments,
-            max_speed=min(1.25, follow_original_rate),
-            mode="follow_translation" if sync_mode == "follow_translation"
-            else "follow_original",
-            max_workers=pool_cfg.build_workers,
-        )
-
-        for seg in segments:
-            seg["vc_file"] = seg.get("tts_file")
-            if seg.get("skip_tts"):
-                seg["vc_file"] = seg.get("segment_file")
-                print(f"       [skip-tts] seg {seg['index']}: 语气词片段，跳过翻译（保留原声）")
-
-        segments = _required_stage("AUDIO_DSP_FAILED", builder.build,
-            segments,
-            os.path.join(work_dir, builder.subdir),
-            max_workers=pool_cfg.build_workers,
-        )
-        if sync_mode == "follow_translation":
-            segments = _required_stage("AUDIO_DSP_FAILED", apply_follow_translation_cap,
-                segments, max_overhang_ms=follow_translation_overhang_ms
+        timeline_render = getattr(builder, "timeline_render", False) is True
+        if not timeline_render:
+            segments = _required_stage("AUDIO_DSP_FAILED", align_tts_to_original,
+                segments, tts_volume=tts_volume, max_workers=pool_cfg.build_workers
             )
+            segments = _required_stage("AUDIO_DSP_FAILED", enforce_tts_budget,
+                segments,
+                max_speed=min(1.25, follow_original_rate),
+                mode="follow_translation" if sync_mode == "follow_translation"
+                else "follow_original",
+                max_workers=pool_cfg.build_workers,
+            )
+
+            for seg in segments:
+                seg["vc_file"] = seg.get("tts_file")
+                if seg.get("skip_tts"):
+                    seg["vc_file"] = seg.get("segment_file")
+                    print(f"       [skip-tts] seg {seg['index']}: 语气词片段，跳过翻译（保留原声）")
+
+            segments = _required_stage("AUDIO_DSP_FAILED", builder.build,
+                segments,
+                os.path.join(work_dir, builder.subdir),
+                max_workers=pool_cfg.build_workers,
+            )
+            if sync_mode == "follow_translation":
+                segments = _required_stage("AUDIO_DSP_FAILED", apply_follow_translation_cap,
+                    segments, max_overhang_ms=follow_translation_overhang_ms
+                )
         all_segments = segments
         print(f"       Global stages complete, {len(all_segments)} total segments")
 
@@ -864,9 +870,15 @@ def run_pipeline(
         ps("Joining processed segments into final audio...")
         print_progress("concat", "正在合并最终文件", 0, 1)
         final_output = os.path.join(output_dir, "output.wav")
-        joined = _required_stage("AUDIO_JOIN_FAILED", join_audio,
-                                 all_segments, final_output, crossfade_ms=crossfade_ms,
-                                 return_timeline=True)
+        if timeline_render:
+            from .timeline_render import TimelineRenderConfig, render_initial_timeline
+            joined = _required_stage("AUDIO_JOIN_FAILED", render_initial_timeline,
+                                     all_segments, output_dir, audio_path,
+                                     TimelineRenderConfig(min(1.25, follow_original_rate), tts_volume))
+        else:
+            joined = _required_stage("AUDIO_JOIN_FAILED", join_audio,
+                                     all_segments, final_output, crossfade_ms=crossfade_ms,
+                                     return_timeline=True)
         print_progress("concat", "正在合并最终文件", 1, 1)
 
         # Record last step time
@@ -921,10 +933,14 @@ def run_pipeline(
         except Exception as error:
             from .error import ExportError, descriptor
             raise ExportError(descriptor("SUBTITLE_FINAL_EMPTY"), detail=str(error), cause=error) from error
-        from .high_quality_export import write_export_recipe
-        result["high_quality_recipe"] = _required_stage(
-            "OUTPUT_WRITE_DENIED", write_export_recipe, audio_path, all_segments,
-            builder.export_settings(), output_dir, crossfade_ms, follow_translation_overhang_ms)
+        from .high_quality_export import write_export_recipe, write_timeline_recipe
+        if timeline_render:
+            result["high_quality_recipe"] = _required_stage(
+                "OUTPUT_WRITE_DENIED", write_timeline_recipe, audio_path, joined.plan, output_dir)
+        else:
+            result["high_quality_recipe"] = _required_stage(
+                "OUTPUT_WRITE_DENIED", write_export_recipe, audio_path, all_segments,
+                builder.export_settings(), output_dir, crossfade_ms, follow_translation_overhang_ms)
         from .run_results import record_run
         result["run_result"] = _required_stage(
             "OUTPUT_WRITE_DENIED", record_run, output_dir, "succeeded", audio_path)

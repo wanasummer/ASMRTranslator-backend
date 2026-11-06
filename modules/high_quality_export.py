@@ -96,15 +96,39 @@ def write_export_recipe(audio_path: str, segments: list[dict], settings: dict,
             inputs[relative] = file_digest(str(path))
             record[key] = relative
         records.append(record)
+    return save_json(str(work / RECIPE_PATH), {
+        "contractVersion": 1, "source": _source_record(audio_path, work), "settings": settings,
+        "crossfadeMs": crossfade_ms, "overhangMs": overhang_ms,
+        "segments": records, "inputs": inputs,
+    })
+
+
+def _source_record(audio_path: str, work: Path) -> dict:
     source = {"path": str(Path(audio_path).resolve()), "sha256": file_digest(audio_path)}
     target = address(work / RECIPE_PATH)
     project_root = target.store.root.parent if target.store.root.name == 'generated' else target.store.root
     if Path(audio_path).resolve().is_relative_to(project_root):
         source["projectRelativePath"] = Path(audio_path).resolve().relative_to(project_root).as_posix()
+    return source
+
+
+def write_timeline_recipe(audio_path: str, plan, output_dir: str) -> str:
+    """Snapshot a whole-timeline arrangement plan (contract 2) with voice fingerprints."""
+    from .storage import initialize_project
+    initialize_project(output_dir)
+    work = Path(output_dir).resolve()
+    clips, inputs = [], {}
+    for clip in plan.clips:
+        relative = Path(clip.path).resolve().relative_to(work).as_posix()
+        inputs[relative] = file_digest(str(clip.path))
+        clips.append({"index": clip.index, "start_ms": clip.start_ms, "end_ms": clip.end_ms,
+                      "text": clip.text, "path": relative, "volume": clip.volume,
+                      "reference_start_ms": clip.reference_start_ms,
+                      "reference_end_ms": clip.reference_end_ms,
+                      "sample_start_ms": clip.sample_start_ms, "sample_end_ms": clip.sample_end_ms})
     return save_json(str(work / RECIPE_PATH), {
-        "contractVersion": 1, "source": source, "settings": settings,
-        "crossfadeMs": crossfade_ms, "overhangMs": overhang_ms,
-        "segments": records, "inputs": inputs,
+        "contractVersion": 2, "renderer": "arrangement", "source": _source_record(audio_path, work),
+        "globalLoudness": plan.global_loudness, "clips": clips, "inputs": inputs,
     })
 
 
@@ -112,7 +136,9 @@ def load_recipe(path: str) -> tuple[dict, Path]:
     target = address(path)
     work = target.store.root / "assets" / target.scope if target.scope else target.store.root
     recipe = read_json(path)
-    if recipe.get("contractVersion") != 1 or not recipe.get("segments"):
+    version = recipe.get("contractVersion")
+    if not ((version == 1 and recipe.get("segments"))
+            or (version == 2 and recipe.get("renderer") == "arrangement" and "clips" in recipe)):
         raise HighQualityExportError("高音质重建记录无效，请重新生成任务。")
     source = recipe["source"]
     if "projectRelativePath" in source:
@@ -173,10 +199,23 @@ def _append_pcm(output, data: np.ndarray, crossfade: int, overlap: int, channels
     return total + length - count
 
 
+def _render_arrangement_input(recipe: dict, work: Path, folder: Path) -> list[str]:
+    """Render a contract-2 timeline with the same adapter the studio export uses."""
+    from .arrangement_audio import create_arrangement_audio_adapter
+    from .arrangement_contracts import ArrangedClip, ArrangementPlan
+    clips = []
+    for clip in recipe["clips"]:
+        if clip["path"] not in recipe["inputs"]:
+            raise HighQualityExportError("TTS 路径缺少完整性记录。")
+        clips.append(ArrangedClip(**{**clip, "path": work / clip["path"]}))
+    plan = ArrangementPlan(Path(recipe["source"]["path"]), tuple(clips), bool(recipe.get("globalLoudness")))
+    rendered = folder / "arranged.wav"
+    create_arrangement_audio_adapter().render(plan).audio.export(rendered, format="wav")
+    return ["-i", str(rendered)]
+
+
 def _render_high_quality(recipe_path: str, target_path: str) -> str:
-    """Rebuild through existing mode strategies at the native source profile."""
-    from .mode_builders import create_segment_builder
-    from .audio_joiner import apply_follow_translation_cap
+    """Rebuild through the recorded renderer at the native source profile."""
     from .audio_metadata import create_metadata_reader, write_audio_metadata
 
     recipe, work = load_recipe(recipe_path)
@@ -190,40 +229,17 @@ def _render_high_quality(recipe_path: str, target_path: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".hq-", dir=target.parent) as temporary:
         folder = Path(temporary)
-        segments = _native_slices(recipe, work, folder, profile)
-        builder = create_segment_builder(**recipe["settings"])
-        builder.wav_params = profile.wav_params
-        segments = builder.build(segments, str(folder / "build"), max_workers=1)
-        for segment in segments:
-            if segment.get("skip_tts"):
-                segment["vc_file"] = segment["segment_file"]
-            elif not segment.get("vc_file"):
-                segment["vc_file"] = segment["tts_file"]
-        if recipe["settings"].get("sync_mode") == "follow_translation":
-            segments = apply_follow_translation_cap(segments, max_overhang_ms=recipe["overhangMs"],
-                                                    wav_params=profile.wav_params)
-        pcm = folder / "combined.pcm"
-        count = 0
-        with pcm.open("w+b") as output:
-            for segment in segments:
-                raw = _command([get_ffmpeg_path(), "-v", "error", "-i", segment["vc_file"],
-                    "-map", "0:a:0", "-f", "s32le", "-ar", str(profile.sample_rate),
-                    "-ac", str(profile.channels), "-"])
-                samples = np.frombuffer(raw, dtype="<i4").reshape(-1, profile.channels)
-                if len(samples) < profile.sample_rate * 0.05:
-                    continue
-                count = _append_pcm(output, samples,
-                    round(recipe["crossfadeMs"] * profile.sample_rate / 1000),
-                    round(segment.get("overlap_ms", 0) * profile.sample_rate / 1000), profile.channels)
-        if not count:
-            raise HighQualityExportError("没有可导出的有效高音质片段。")
+        if recipe.get("contractVersion") == 2:
+            source_input = _render_arrangement_input(recipe, work, folder)
+        else:
+            source_input = _render_segment_input(recipe, work, folder, profile)
         bits = profile.bits if profile.bits in {8, 16, 24, 32} else 24
         codec = f"pcm_s{bits}le" if bits != 8 else "pcm_u8"
         if profile.codec.startswith("pcm_f"):
             codec = "pcm_f32le"
         encoding = ["-c:a", "libmp3lame", "-b:a", str(profile.mp3_bitrate)] if target.suffix.lower() == ".mp3" else ["-c:a", codec]
-        _command([get_ffmpeg_path(), "-y", "-v", "error", "-f", "s32le", "-ar", str(profile.sample_rate),
-            "-ac", str(profile.channels), "-i", str(pcm), *encoding, str(target)])
+        _command([get_ffmpeg_path(), "-y", "-v", "error", *source_input,
+            "-ar", str(profile.sample_rate), "-ac", str(profile.channels), *encoding, str(target)])
         actual = probe_audio(str(target))
         if (actual.sample_rate != profile.sample_rate or actual.channels != profile.channels
                 or (target.suffix.lower() == ".mp3" and abs(actual.bitrate - profile.mp3_bitrate) > 1000)
@@ -234,6 +250,40 @@ def _render_high_quality(recipe_path: str, target_path: str) -> str:
     print(f"[export.high-quality] sample_rate={profile.sample_rate} bits={profile.bits} "
           f"channels={profile.channels} bitrate={profile.bitrate} output={target}")
     return str(target)
+
+
+def _render_segment_input(recipe: dict, work: Path, folder: Path, profile: AudioProfile) -> list[str]:
+    """Rebuild a contract-1 recipe through the slice mode strategies as raw PCM."""
+    from .mode_builders import create_segment_builder
+    from .audio_joiner import apply_follow_translation_cap
+    segments = _native_slices(recipe, work, folder, profile)
+    builder = create_segment_builder(**recipe["settings"])
+    builder.wav_params = profile.wav_params
+    segments = builder.build(segments, str(folder / "build"), max_workers=1)
+    for segment in segments:
+        if segment.get("skip_tts"):
+            segment["vc_file"] = segment["segment_file"]
+        elif not segment.get("vc_file"):
+            segment["vc_file"] = segment["tts_file"]
+    if recipe["settings"].get("sync_mode") == "follow_translation":
+        segments = apply_follow_translation_cap(segments, max_overhang_ms=recipe["overhangMs"],
+                                                wav_params=profile.wav_params)
+    pcm = folder / "combined.pcm"
+    count = 0
+    with pcm.open("w+b") as output:
+        for segment in segments:
+            raw = _command([get_ffmpeg_path(), "-v", "error", "-i", segment["vc_file"],
+                "-map", "0:a:0", "-f", "s32le", "-ar", str(profile.sample_rate),
+                "-ac", str(profile.channels), "-"])
+            samples = np.frombuffer(raw, dtype="<i4").reshape(-1, profile.channels)
+            if len(samples) < profile.sample_rate * 0.05:
+                continue
+            count = _append_pcm(output, samples,
+                round(recipe["crossfadeMs"] * profile.sample_rate / 1000),
+                round(segment.get("overlap_ms", 0) * profile.sample_rate / 1000), profile.channels)
+    if not count:
+        raise HighQualityExportError("没有可导出的有效高音质片段。")
+    return ["-f", "s32le", "-ar", str(profile.sample_rate), "-ac", str(profile.channels), "-i", str(pcm)]
 
 
 def render_high_quality(recipe_path: str, target_path: str) -> str:
