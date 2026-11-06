@@ -47,26 +47,48 @@ uv run python main.py --help
 
 ```mermaid
 flowchart LR
-    Audio["原始音频"] --> VAD["VAD 人声检测"]
-    VAD --> ASR["ASR 语音识别<br/>生成日语原文"]
+    Audio["原始音频"] --> VAD["VAD 人声检测<br/>(ASMR-VAD / FSMN-VAD)"]
+    VAD --> ASR{"ASR 语音识别"}
 
-    subgraph Qwen["Qwen 独立路线"]
-        QAlign["日语词级对齐"] --> QSplit["独立规则分句"]
+    ASR -->|"通用 ASR<br/>(Fish / Fun / MiMo / 通用插件)"| ASR_GEN["通用 ASR<br/>输出粗分切片"]
+    ASR -->|"MOSS 插件<br/>(moss-transcribe-diarize)"| ASR_MOSS["MOSS 转写与说话人切分<br/>输出说话人与原生时序块"]
+
+    subgraph MOSS_DETECT["MOSS 专属路线 (moss-native，默认)"]
+        M_Mora["句末断句 + 音拍权重先验"] --> M_RMS["短时声学能量低谷寻优<br/>(停顿/喘息谷地中心吸附)"]
+        M_RMS --> M_Source["绑定父级 source_block_id<br/>(继承同源粗分血统)"]
     end
 
-    subgraph FSMN["FSMN / MeCab 路线"]
-        FDetect["日语句界 + 细粒度 VAD"] --> FAlign["时长估算 + 联合切分"]
+    subgraph Qwen["Qwen 独立路线 (qwen-force-align)"]
+        QAlign["日语词级强制对齐"] --> QSplit["独立规则分句切块"]
     end
 
-    ASR --> QAlign
-    ASR --> FDetect
-    QSplit --> Merge["统一字幕与时间轴<br/>日语清洗"]
+    subgraph JointVAD["Joint-VAD / MeCab 路线 (joint-vad)"]
+        FDetect["日语句界分析 + 细粒度 VAD"] --> FAlign["音拍时长估算 + 联合动态切分"]
+    end
+
+    ASR_GEN --> FDetect
+    ASR_GEN --> QAlign
+    ASR_MOSS -->|"默认或指定"| M_Mora
+    ASR_MOSS -->|"可选手动切换"| QAlign
+    ASR_MOSS -->|"可选手动切换"| FDetect
+    ASR_MOSS -.->|"关闭 Detect"| Merge
+
+    M_Source --> Merge["统一字幕与时间轴<br/>日语语气词清洗"]
+    QSplit --> Merge
     FAlign --> Merge
-    Merge --> LLM["LLM<br/>摘要 → 翻译 → 可选润色"]
-    Subtitle["已有字幕"] --> LLM
-    LLM --> TTS["TTS 配音<br/>响度与时长调整"]
-    TTS --> Output["汇总输出<br/>音频合成 + 字幕导出"]
+    ASR_GEN -.->|"关闭 Detect"| Merge
+
+    Merge --> LLM["LLM 大模型处理<br/>情节摘要 → 句意翻译 → 可选润色"]
+    Subtitle["已有字幕输入"] --> LLM
+    LLM --> TTS["TTS 配音合成<br/>响度与时长调整"]
+    TTS --> Studio["音频编排工作室 (Audio Arrangement)<br/>识别同源 source_block_id 渲染【同源粗分】约束"]
+    Studio --> Output["汇总输出<br/>音频合成 (MP3/WAV) + 统一项目数据库 (SQLite)"]
 ```
+
+> **Detect 细切模块说明**：
+> - **MOSS 专属切分（`moss-native`，默认）**：针对 MOSS 长文本粗分块，先利用日语标点做语法断句，再通过音拍权重（Mora）估算初始时序比例，最后在 $\pm 250\text{ms}$ 内扫描 RMS 短时能量寻找停顿/吸气低谷并吸附切分点。切分出的子句均继承父级 `source_block_id` 与原块区间。
+> - **对齐器可选性**：ASR 选择 MOSS 时默认启用 `moss-native`，用户亦可根据需要手动切换为 `joint-vad`（日语句法与 VAD 联合切分）或 `qwen-force-align`（Qwen 插件强制对齐）；关闭 Detect 时则直接保留 ASR 原生时间轴送翻。
+> - **编排联动**：挂载 `source_block_id` 的切分子句进入音频编排工作室时，系统会自动标识【同源粗分】徽标并施加父级时间盒与安全间隙约束。
 
 
 ## 配置与日志
