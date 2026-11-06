@@ -15,6 +15,8 @@ from .artifacts import write_detect_artifact
 from .contracts import AlignedSentenceBlock, DetectStageInput, DetectStageResult
 from .duration import count_japanese_mora
 from .moss_config import MOSS_POLICY_VERSION, MossDetectConfig
+from .moss_verify import (MossBoundaryVerifier, TranscribePort, VerificationPolicy,
+                          VerificationUnavailable, energy_valleys)
 
 
 class WordAlignmentPort(Protocol):
@@ -143,9 +145,11 @@ def proportional_spans(start_ms: int, end_ms: int, parts: tuple[str, ...],
 class MossDetectStage:
     def __init__(self, config: MossDetectConfig, audio_path: str, *,
                  client: WordAlignmentPort | None = None,
-                 recalibrate_client: WordAlignmentPort | None = None):
+                 recalibrate_client: TranscribePort | None = None,
+                 valley_finder=energy_valleys):
         self.config, self.audio_path, self.client = config, audio_path, client
         self.recalibrate_client = recalibrate_client
+        self.valley_finder = valley_finder
 
     def _request_alignment(self, block) -> tuple[dict, int]:
         if self.client is not None:
@@ -184,57 +188,34 @@ class MossDetectStage:
             raise ValueError("sentence_too_short")
         return tuple(zip(edges, edges[1:]))
 
-    def _recalibrate_spans(self, block, parts: tuple[str, ...],
-                           spans: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
-        recalibrate_client = self.recalibrate_client
-        if recalibrate_client is None and self.config.recalibrate_endpoint:
+    def _verify_spans(self, parts: tuple[str, ...],
+                      spans: tuple[tuple[int, int], ...]) -> tuple[tuple[tuple[int, int], ...], dict]:
+        """Let MOSS judge the acoustic boundaries; recompute the rejected ones."""
+        port = self.recalibrate_client
+        if port is None and self.config.recalibrate_endpoint:
             try:
-                recalibrate_client = AnalysisPluginClient(
-                    self.config.recalibrate_endpoint, "moss-transcribe-diarize", "moss-transcribe-diarize/1"
-                )
-            except Exception:
-                recalibrate_client = None
-
-        if recalibrate_client is None:
-            return spans
-
-        new_spans = []
-        for child_idx, (text, (start, end)) in enumerate(zip(parts, spans)):
-            duration = end - start
-            if duration < self.config.min_recalibrate_duration_ms:
-                new_spans.append((start, end))
-                continue
-
-            try:
-                body, _ = recalibrate_client.request(
-                    "/transcribe", self.audio_path, {"language": "ja"},
-                    start_ms=start, end_ms=end,
-                )
-                child_blocks = body.get("blocks", []) if isinstance(body, dict) else []
-                if not child_blocks:
-                    new_spans.append((start, end))
-                    continue
-
-                recal_text = "".join(b.get("text", "") for b in child_blocks)
-                if _lexical(recal_text) != _lexical(text):
-                    new_spans.append((start, end))
-                    continue
-
-                first_start_rel = child_blocks[0].get("start_ms", 0)
-                last_end_rel = child_blocks[-1].get("end_ms", duration)
-                cal_start = start + first_start_rel
-                cal_end = start + last_end_rel
-
-                if (cal_end - cal_start >= self.config.min_sentence_duration_ms
-                        and start <= cal_start < cal_end <= end):
-                    print(f"       [detect:moss] 二次微调句 {child_idx}: [{start}, {end}] -> [{cal_start}, {cal_end}]")
-                    new_spans.append((cal_start, cal_end))
-                else:
-                    new_spans.append((start, end))
-            except Exception:
-                new_spans.append((start, end))
-
-        return tuple(new_spans)
+                port = AnalysisPluginClient(self.config.recalibrate_endpoint,
+                                            "moss-transcribe-diarize", "moss-transcribe-diarize/1")
+            except (AnalysisPluginError, ValueError) as error:
+                return spans, {"status": "unavailable", "reason": str(error), "boundaries": []}
+        if port is None:
+            return spans, {"status": "unavailable", "reason": "no_moss_endpoint", "boundaries": []}
+        policy = VerificationPolicy(self.config.min_verify_duration_ms,
+                                    self.config.min_sentence_duration_ms,
+                                    self.config.verify_similarity,
+                                    self.config.max_verify_candidates)
+        edges = (spans[0][0],) + tuple(end for _, end in spans)
+        try:
+            verified, audits = MossBoundaryVerifier(
+                port, self.audio_path, policy, valley_finder=self.valley_finder).verify(parts, edges)
+        except VerificationUnavailable as error:
+            return spans, {"status": "unavailable", "reason": str(error), "boundaries": []}
+        counts = {name: sum(a["status"] == name for a in audits)
+                  for name in ("verified", "recomputed", "improved", "unverified", "skipped")}
+        print("       [detect:moss] MOSS 核验：通过 {verified}，重算 {recomputed}，"
+              "改善 {improved}，未通过 {unverified}，跳过 {skipped}".format(**counts))
+        return tuple(zip(verified, verified[1:])), {"status": "checked", "counts": counts,
+                                                    "boundaries": list(audits)}
 
     def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
         write_detect_artifact(output_dir, "moss_detection_input.json", {
@@ -246,6 +227,7 @@ class MossDetectStage:
         for position, block in enumerate(value.asr_blocks):
             parts = native_sentences(block.text)
             outcome, reason, spans = "exact", None, ()
+            verification = None
             method = "moss-native"
             if block.skip_tts:
                 outcome = "bypassed"
@@ -276,7 +258,7 @@ class MossDetectStage:
                         reason = None
                         method = "moss-native"
                         if self.config.recalibrate:
-                            spans = self._recalibrate_spans(block, parts, spans)
+                            spans, verification = self._verify_spans(parts, spans)
                     else:
                         outcome = "fallback"
                         reason = "sentence_too_short"
@@ -297,7 +279,7 @@ class MossDetectStage:
                         text=text, source_text=text, cleaned_source_text="", aligned_sentence=aligned,
                         translation_available=False))
             records.append({"sourceBlockId": source_id, "outcome": outcome, "reason": reason,
-                            "parts": parts, "spans": spans})
+                            "parts": parts, "spans": spans, "verification": verification})
         summary["outputSentences"] = len(output)
         write_detect_artifact(output_dir, "moss_detection.json", {
             "policyVersion": MOSS_POLICY_VERSION, "config": self.config,
