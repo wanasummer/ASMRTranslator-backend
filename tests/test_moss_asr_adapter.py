@@ -127,6 +127,25 @@ class MossAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([b.index for b in result], [0, 1, 2, 3])
         self.assertEqual(blocks[3].index, 3)
 
+    async def test_forced_split_context_echoes_yield_to_the_owning_crop(self):
+        first = AsrSlice("slice-59540-79540", 59140, 79940, 59540, 79540, (), True)
+        second = AsrSlice("slice-79540-84540", 75140, 84940, 79540, 84540, (), True)
+        third = AsrSlice("slice-84540-104540", 84140, 104940, 84540, 104540, (), True)
+        blocks = [
+            VTTBlock(0, 67950, 76690, "お兄さん、耳元でおしゃべりしているだけでドキドキしてますよね。", asr_slice=first),
+            VTTBlock(1, 75140, 76360, "してますよね。", asr_slice=second),
+            VTTBlock(2, 76960, 78260, "わかった。", asr_slice=second),
+            VTTBlock(3, 79460, 79940, "お兄。", asr_slice=first),
+            VTTBlock(4, 79460, 80380, "お兄さん。", asr_slice=second),
+            VTTBlock(5, 81760, 84880, "私たちの魅力に抗えないの。", asr_slice=second),
+            VTTBlock(6, 84140, 88380, "ないと、ほら、一緒にお布団に車", asr_slice=third),
+        ]
+        result = merge_slice_blocks(blocks)
+        self.assertEqual([b.text for b in result], [
+            "お兄さん、耳元でおしゃべりしているだけでドキドキしてますよね。", "わかった。",
+            "お兄さん。", "私たちの魅力に抗えないの。", "ないと、ほら、一緒にお布団に車"])
+        self.assertEqual([b.index for b in result], [0, 1, 2, 3, 4])
+
     async def test_invalid_or_failed_service_is_a_typed_error(self):
         client = Mock()
         client.request.side_effect = AnalysisPluginError("wrong identity")

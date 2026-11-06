@@ -28,14 +28,41 @@ class MossDocumentResult:
     japanese_cleanup_required: bool = False
 
 
-def merge_slice_blocks(blocks: Sequence[VTTBlock]) -> list[VTTBlock]:
-    """Remove exact duplicate observations from overlapping VAD crops only.
+def _owns(parent: AsrSlice | None, time_ms: float) -> bool:
+    return parent is not None and parent.speech_start_ms <= time_ms <= parent.speech_end_ms
 
-    Preserve native timestamps and simultaneous speakers within one crop.
-    Raw observations remain available in the per-slice response audit.
+
+def _midpoint(block: VTTBlock) -> float:
+    return (block.start_ms + block.end_ms) / 2
+
+
+def _context_echo(block: VTTBlock, blocks: Sequence[VTTBlock]) -> bool:
+    """True when ``block`` was decoded from a crop's context padding and the
+    crop owning that time recognised overlapping speech itself."""
+    middle = _midpoint(block)
+    if block.asr_slice is None or _owns(block.asr_slice, middle):
+        return False
+    return any(
+        other.asr_slice is not None and other.asr_slice != block.asr_slice
+        and _owns(other.asr_slice, middle) and _owns(other.asr_slice, _midpoint(other))
+        and other.start_ms < block.end_ms and block.start_ms < other.end_ms
+        for other in blocks
+    )
+
+
+def merge_slice_blocks(blocks: Sequence[VTTBlock]) -> list[VTTBlock]:
+    """Remove duplicate observations from overlapping VAD crops only.
+
+    A block centred outside its crop's owned speech range is dropped when the
+    owning crop has an overlapping block; forced splits otherwise yield the
+    same words twice, often with one copy truncated at the extraction edge.
+    Exact duplicates across crops are also dropped. Preserve native timestamps
+    and simultaneous speakers within one crop. Raw observations remain
+    available in the per-slice response audit.
     """
+    owned = [block for block in blocks if not _context_echo(block, blocks)]
     output = []
-    for block in sorted(blocks, key=lambda item: item.start_ms):
+    for block in sorted(owned, key=lambda item: item.start_ms):
         duplicate = False
         for previous in output:
             if (previous.asr_slice == block.asr_slice
