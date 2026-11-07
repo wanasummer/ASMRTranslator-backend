@@ -48,13 +48,54 @@ def initial_state(work: Path) -> ArrangementState:
                  "replacement": None, "deleted": False} for row in rows]}
 
 
+def inserted_row(edit: dict) -> dict:
+    """Baseline-shaped row for a user-added fragment; it has no subtitle or cached audio."""
+    inserted = edit["inserted"]
+    row = {"index": edit["index"], "start_ms": inserted["startMs"], "end_ms": inserted["endMs"],
+           "text": "", "source_text": ""}
+    if inserted.get("sourceBlockId"):
+        row["source_block_id"] = inserted["sourceBlockId"]
+    if inserted.get("speaker"):
+        row["speaker"] = inserted["speaker"]
+    return row
+
+
+def aligned_rows(rows: list[dict], edits: list[dict]) -> list[tuple[int | None, dict]]:
+    """Pair each draft position with its baseline position (None when inserted) and row."""
+    result, source = [], 0
+    for edit in edits:
+        if edit.get("inserted"):
+            result.append((None, inserted_row(edit)))
+        else:
+            result.append((source, rows[source]))
+            source += 1
+    return result
+
+
+def _validate_inserted(edit: dict) -> None:
+    inserted = edit["inserted"]
+    if not isinstance(inserted, dict) or isinstance(edit.get("index"), bool) or not isinstance(edit.get("index"), int):
+        raise ArrangementError("新增片段格式无效")
+    start, end = inserted.get("startMs"), inserted.get("endMs")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in (start, end)) or start < 0 or end <= start:
+        raise ArrangementError("新增片段时间范围无效")
+    if any(inserted.get(key) is not None and not isinstance(inserted[key], str) for key in ("sourceBlockId", "speaker")):
+        raise ArrangementError("新增片段归属格式无效")
+
+
 def validate_state(work: Path, state: ArrangementState) -> ArrangementState:
     rows, version = read_baseline(work)
     if state.get("schemaVersion") != 1 or state.get("sourceVersion") != version:
         raise ArrangementError("来源字幕已变化，请重新载入后编排")
     edits = state.get("segments", [])
-    if len(edits) != len(rows) or [r.get("index") for r in edits] != [r["index"] for r in rows]:
+    baseline_edits = [edit for edit in edits if not edit.get("inserted")]
+    if len(baseline_edits) != len(rows) or [r.get("index") for r in baseline_edits] != [r["index"] for r in rows]:
         raise ArrangementError("编排片段标识或顺序与来源不一致")
+    for edit in edits:
+        if edit.get("inserted"):
+            _validate_inserted(edit)
+    if len({edit["index"] for edit in edits}) != len(edits):
+        raise ArrangementError("编排片段标识重复")
     if state.get("loudnessScope") not in ("segment", "global"):
         raise ArrangementError("响度模式无效")
     for value in [state.get("globalVolume"), *[row.get("volume") for row in edits]]:
@@ -293,11 +334,12 @@ def run_editor_request(payload: dict) -> dict:
         return commit_optimized_fragment(work, payload)
     if action == "optimize-fragment":
         rows, version = read_baseline(work)
+        aligned = aligned_rows(rows, load_state(work)["segments"])
         position = payload.get("position")
         fragment = payload.get("fragment")
         if (payload.get("sourceVersion") != version or not isinstance(position, int)
-                or not 0 <= position < len(rows) or not isinstance(fragment, dict)
-                or fragment.get("index") != rows[position]["index"]):
+                or not 0 <= position < len(aligned) or not isinstance(fragment, dict)
+                or fragment.get("index") != aligned[position][1]["index"]):
             raise ArrangementError("来源字幕或片段标识已变化，请重新载入")
         if not isinstance(fragment.get("text"), str) or not isinstance(fragment.get("japanese"), str):
             raise ArrangementError("字幕草稿格式无效")
@@ -328,11 +370,13 @@ def run_editor_request(payload: dict) -> dict:
             raise ArrangementError("片段位置无效")
         rows, _ = read_baseline(work)
         edit = state["segments"][position]
-        replacement = asyncio.run(synthesize_edit(work, {**rows[position], **edit},
+        _, row = aligned_rows(rows, state["segments"])[position]
+        replacement = asyncio.run(synthesize_edit(work, {**row, **edit},
                                                   payload["config"], payload["ttsKwargs"]))
         with draft_lock(work) as repository:
             latest = load_state(work, repository)
-            if latest["segments"][position]["text"] == edit["text"]:
+            target = latest["segments"][position] if position < len(latest["segments"]) else None
+            if target is not None and target["index"] == edit["index"] and target["text"] == edit["text"]:
                 latest["segments"][position]["replacement"] = replacement
                 latest["segments"][position]["ttsSample"] = None
             return {"state": save_state(work, latest, repository)}
@@ -350,19 +394,23 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
     clips = []
     reused = replaced = 0
     previous_end = -math.inf
-    for position, (baseline, edit) in enumerate(zip(rows, state["segments"])):
+    pairs = aligned_rows(rows, state["segments"])
+    timeline = [row for _, row in pairs]
+    for position, ((source_position, baseline), edit) in enumerate(zip(pairs, state["segments"])):
         if edit.get("deleted", False):
             continue
         replacement = edit.get("replacement")
         if replacement and replacement["text"] == edit["text"]:
             path = resolve_replacement(work, replacement["path"])
             replaced += 1
+        elif source_position is None and not edit["text"].strip():
+            continue
         elif edit["text"] != baseline["text"]:
             replacement = asyncio.run(synthesize_edit(work, {**baseline, **edit}, config, kwargs))
             path = resolve_replacement(work, replacement["path"])
             replaced += 1
         else:
-            path = cached_tts(work, position)
+            path = cached_tts(work, source_position)
             if path is None:
                 # Original-only interjections have no generated TTS cache.
                 if baseline.get("skip_tts", len(re.findall(r"[\u4e00-\u9fff]", baseline["text"])) <= 3):
@@ -381,7 +429,7 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
             next_sentence_start = next(
                 (
                     round(later["interval"]["start"] if later.get("interval") is not None else later_baseline["start_ms"])
-                    for later_baseline, later in zip(rows[position + 1:], state["segments"][position + 1:])
+                    for later_baseline, later in zip(timeline[position + 1:], state["segments"][position + 1:])
                     if not later.get("deleted", False)
                 ),
                 None,
@@ -403,5 +451,6 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
                                   round(reference.get("start", reference.get("start_ms"))),
                                   round(reference.get("end", reference.get("end_ms"))), sample_start, sample_end))
     deleted = sum(bool(edit.get("deleted", False)) for edit in state["segments"])
-    print(f"[arrangement] 共 {len(rows)} 段，删除 {deleted} 段，复用 TTS 缓存 {reused} 段，替换 {replaced} 段")
+    inserted = len(state["segments"]) - len(rows)
+    print(f"[arrangement] 共 {len(rows)} 段，新增 {inserted} 段，删除 {deleted} 段，复用 TTS 缓存 {reused} 段，替换 {replaced} 段")
     return ArrangementPlan(source_audio, tuple(clips), False)

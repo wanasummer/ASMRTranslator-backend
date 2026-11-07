@@ -1,7 +1,7 @@
 """Stable values passed from arrangement preparation to rendering and writing."""
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypedDict
+from typing import NotRequired, Protocol, TypedDict
 
 
 class ArrangementError(RuntimeError):
@@ -18,6 +18,14 @@ class Replacement(TypedDict):
     text: str
 
 
+class InsertedFragment(TypedDict):
+    """Timing of a user-added fragment that has no baseline subtitle row."""
+    startMs: float
+    endMs: float
+    sourceBlockId: NotRequired[str | None]
+    speaker: NotRequired[str | None]
+
+
 class ArrangementEdit(TypedDict):
     index: int
     text: str
@@ -28,6 +36,7 @@ class ArrangementEdit(TypedDict):
     deleted: bool
     originalInterval: Interval | None
     ttsSample: Interval | None
+    inserted: NotRequired[InsertedFragment | None]
 
 
 class ArrangementState(TypedDict):

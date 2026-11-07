@@ -169,6 +169,69 @@ class ArrangementTests(unittest.TestCase):
         save_state(self.work, self.state)
         self.assertFalse(load_state(self.work)["segments"][0]["deleted"])
 
+    def _insert_after_first(self, text=""):
+        inserted = {"index": 14, "text": text, "japanese": "", "volume": 1, "interval": None,
+                    "originalInterval": None, "ttsSample": None, "replacement": None, "deleted": False,
+                    "inserted": {"startMs": 1000, "endMs": 2000, "sourceBlockId": "block-a", "speaker": None}}
+        self.state["segments"].insert(1, inserted)
+        return inserted
+
+    def test_inserted_fragment_is_saved_and_baseline_order_still_enforced(self):
+        self._insert_after_first()
+        save_state(self.work, self.state)
+        self.assertEqual([edit["index"] for edit in load_state(self.work)["segments"]], [7, 14, 13])
+        for mutate in (lambda edits: edits[1].update(index=13),
+                       lambda edits: edits[1]["inserted"].update(endMs=500),
+                       lambda edits: edits[1]["inserted"].update(sourceBlockId=3),
+                       lambda edits: edits.reverse()):
+            bad = json.loads(json.dumps(self.state))
+            mutate(bad["segments"])
+            with self.assertRaises(ArrangementError):
+                save_state(self.work, bad)
+
+    def test_blank_inserted_fragment_is_omitted_and_baseline_cache_keeps_its_position(self):
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        (cache / "tts_0000.wav").touch()
+        (cache / "tts_0001.wav").touch()
+        self._insert_after_first()
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 1000)), \
+             patch("modules.arrangement.synthesize_edit") as synth:
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+        synth.assert_not_called()
+        self.assertEqual([clip.index for clip in plan.clips], [7, 13])
+        self.assertEqual(plan.clips[1].path, cache / "tts_0001.wav")
+
+    def test_inserted_fragment_with_text_is_synthesized_on_its_own_timing(self):
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        (cache / "tts_0000.wav").touch()
+        (cache / "tts_0001.wav").touch()
+        self._insert_after_first("新增的一句台词")
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+        synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": "新增的一句台词"})
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 500)), \
+             patch("modules.arrangement.synthesize_edit", synth):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+        row = synth.call_args.args[1]
+        self.assertEqual((row["start_ms"], row["end_ms"], row["source_block_id"]), (1000, 2000, "block-a"))
+        self.assertEqual([(clip.index, clip.start_ms) for clip in plan.clips], [(7, 0), (14, 1000), (13, 2000)])
+
+    def test_regenerate_inserted_fragment_uses_its_own_row(self):
+        self._insert_after_first("新增的一句台词")
+        save_state(self.work, self.state)
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+        synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": "新增的一句台词"})
+        with patch("modules.arrangement.synthesize_edit", synth):
+            result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 1,
+                                         "state": self.state, "config": {}, "ttsKwargs": {}})
+        self.assertEqual(synth.call_args.args[1]["index"], 14)
+        self.assertEqual(result["state"]["segments"][1]["replacement"]["path"], "arrangement/audio/new.wav")
+
     def test_stale_source_and_invalid_intervals_are_rejected(self):
         bad = json.loads(json.dumps(self.state))
         bad["segments"][0]["interval"] = {"start": 0, "end": 2200}
