@@ -6,15 +6,18 @@ import hashlib
 import json
 import math
 import re
+from dataclasses import asdict
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 from uuid import uuid4
 
 from .arrangement_repository import ArrangementRepository, create_arrangement_repository
 from .arrangement_contracts import ArrangementError, ArrangementState, ArrangementPlan, ArrangedClip
+from .arrangement_restructure import apply_restructure_plan, restructure_rows
 from .speech_pace import landing_hint_ms
 from .storage import save_json, read_bytes, read_json, address
 from .llm import LLMConfig, is_configured
+from .llm.contracts import RestructurePlan, TimedSourceRow
 from .subtitle_processing.editor import create_subtitle_editor
 from .tts_engine import get_tts_adapter, prepare_text_for_synthesis
 from .vtt_parser import VTTBlock
@@ -24,6 +27,8 @@ class SubtitleOptimizer(Protocol):
     async def optimize_from_japanese(self, block: VTTBlock, japanese: str) -> str: ...
     async def optimize_japanese_text(self, block: VTTBlock, japanese: str) -> str: ...
     async def optimize_chinese_text(self, block: VTTBlock, chinese: str) -> str: ...
+    async def summarize(self, rows: Sequence[TimedSourceRow]) -> str: ...
+    async def restructure(self, rows: Sequence[TimedSourceRow], summary: str, instruction: str) -> RestructurePlan: ...
 
 
 def read_baseline(work: Path) -> tuple[list[dict], str]:
@@ -185,6 +190,83 @@ def commit_optimized_fragment(work: Path, payload: dict) -> dict:
         return {"edit": current, "applied": True}
 
 
+SUBTITLE_BASE = "arrangement/subtitle_base.json"
+
+
+def publish_subtitle_base(work: Path, state: ArrangementState) -> None:
+    """Replace the single subtitle base with the texts of a successfully rendered arrangement."""
+    save_json(str(work / SUBTITLE_BASE), {"sourceVersion": state["sourceVersion"],
+                                          "texts": {str(edit["index"]): edit["text"] for edit in state["segments"]}})
+
+
+def subtitle_base(work: Path) -> dict[int, str]:
+    """Per-fragment text of the audio currently treated as the source.
+
+    The last published arrangement for the current baseline, else the original pipeline subtitles.
+    Fragments absent from the base (later insertions) have no entry.
+    """
+    rows, version = read_baseline(work)
+    try:
+        published = read_json(work / SUBTITLE_BASE)
+    except (OSError, ValueError):
+        published = None
+    if isinstance(published, dict) and published.get("sourceVersion") == version:
+        return {int(index): text for index, text in published.get("texts", {}).items()}
+    return {row["index"]: row["text"] for row in rows}
+
+
+def _active_fragments(work: Path, snapshot: ArrangementState):
+    rows, _ = read_baseline(work)
+    return restructure_rows(snapshot, aligned_rows(rows, snapshot["segments"]))
+
+
+def summarize_arrangement(work: Path, payload: dict, optimizer: SubtitleOptimizer | None = None) -> dict:
+    """Whole-plot summary for later batches; like the pipeline stage, failure degrades to no summary."""
+    fragments = _active_fragments(work, validate_state(work, payload["state"]))
+    if not fragments:
+        raise ArrangementError("没有可优化的片段")
+    client = optimizer or create_optimizer(payload["config"])
+    try:
+        return {"summary": asyncio.run(client.summarize(fragments)), "summaryError": None}
+    except Exception as error:
+        from .error import unexpected_error
+        print(f"[arrangement] 剧情摘要不可用，直接分析片段：{error}")
+        return {"summary": "", "summaryError": unexpected_error(error).to_payload()}
+
+
+def restructure_arrangement(work: Path, payload: dict, optimizer: SubtitleOptimizer | None = None) -> dict:
+    """Plan one batch (``indices``) of the submitted draft, then merge it into the latest saved draft."""
+    instruction, summary, indices = payload.get("instruction"), payload.get("summary") or "", payload.get("indices")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ArrangementError("请填写全局字幕优化要求")
+    if not isinstance(summary, str) or not isinstance(indices, list) or not indices:
+        raise ArrangementError("全局字幕优化批次无效")
+    snapshot = validate_state(work, payload["state"])
+    wanted = set(indices)
+    fragments = [row for row in _active_fragments(work, snapshot) if row.index in wanted]
+    if len(fragments) != len(wanted):
+        raise ArrangementError("优化批次包含不存在或已删除的片段")
+    audit = work / f"arrangement/audit/{uuid4().hex}-restructure"
+    save_json(str(audit.with_suffix(".before.json")),
+              {"instruction": instruction, "summary": summary, "indices": indices, "state": snapshot})
+    try:
+        plan = asyncio.run((optimizer or create_optimizer(payload["config"])).restructure(fragments, summary, instruction))
+    except Exception as error:
+        from .error import unexpected_error
+        save_json(str(audit.with_suffix(".error.json")), unexpected_error(error).to_payload())
+        raise
+    with draft_lock(work) as repository:
+        latest = load_state(work, repository)
+        if latest["sourceVersion"] != snapshot["sourceVersion"]:
+            raise ArrangementError("来源字幕已变化，请重新载入")
+        state, report, changes = apply_restructure_plan(latest, plan, snapshot)
+        save_state(work, state, repository)
+    save_json(str(audit.with_suffix(".after.json")), {"plan": asdict(plan), "report": report, "changes": changes})
+    print(f"[arrangement] 全局字幕优化批次 {len(fragments)} 段：修改 {report['modified']}，删除 {report['deleted']}，"
+          f"合并 {report['merged']} 组，跳过 {len(report['skipped'])}")
+    return {"changes": changes, "report": report}
+
+
 def resolve_replacement(work: Path, relative: str) -> Path:
     path = (work / relative).resolve()
     if not path.is_relative_to((work / "arrangement/audio").resolve()) or not path.is_file():
@@ -332,6 +414,12 @@ def run_editor_request(payload: dict) -> dict:
         return {"state": load_state(work)}
     if action == "commit-optimization":
         return commit_optimized_fragment(work, payload)
+    if action == "subtitle-base":
+        return {"texts": {str(index): text for index, text in subtitle_base(work).items()}}
+    if action == "summarize-arrangement":
+        return summarize_arrangement(work, payload)
+    if action == "optimize-arrangement":
+        return restructure_arrangement(work, payload)
     if action == "optimize-fragment":
         rows, version = read_baseline(work)
         aligned = aligned_rows(rows, load_state(work)["segments"])

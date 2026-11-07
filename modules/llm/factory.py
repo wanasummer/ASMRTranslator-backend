@@ -2,17 +2,19 @@
 
 from dataclasses import dataclass
 from .config import LLMConfig
-from .contracts import Summary, Translation, Polish, TextGenerator
+from .contracts import Summary, Translation, Polish, Restructure, TextGenerator
 from .runtime import LLMRuntime
 from .capabilities.capSummary import SummaryCapability
 from .capabilities.capTranslation import TranslationCapability
 from .capabilities.capPolish import PolishCapability
+from .capabilities.capRestructure import RestructureCapability
 
 
 CAPABILITIES = {
     "summary": SummaryCapability,
     "translation": TranslationCapability,
     "polish": PolishCapability,
+    "restructure": RestructureCapability,
 }
 
 
@@ -22,9 +24,10 @@ class LLMCapabilities:
     summary: Summary
     translation: Translation
     polish: Polish
+    restructure: Restructure
 
 
-def create_capability(name: str, runtime: TextGenerator, config: LLMConfig) -> Summary | Translation | Polish:
+def create_capability(name: str, runtime: TextGenerator, config: LLMConfig) -> Summary | Translation | Polish | Restructure:
     try:
         factory = CAPABILITIES[name]
     except KeyError as error:
@@ -40,4 +43,5 @@ def create_capabilities(config: LLMConfig, cache_dir: str | None = None, *,
         create_capability("summary", runtime, config),
         create_capability("translation", runtime, config),
         create_capability("polish", runtime, config),
+        create_capability("restructure", runtime, config),
     )

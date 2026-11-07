@@ -31,7 +31,7 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     """Rebuild the edited studio timeline from an immutable task snapshot."""
     from contextlib import redirect_stdout
     from uuid import uuid4
-    from .arrangement import prepare_arrangement_plan
+    from .arrangement import prepare_arrangement_plan, publish_subtitle_base
     from .arrangement_audio import create_arrangement_audio_adapter, write_arrangement_result
     work = Path(payload["workDir"])
     output = work / "arrangement/runs" / uuid4().hex
@@ -52,6 +52,7 @@ def run_arrangement_pipeline(payload: dict) -> dict:
             print_progress("concat", "编排完成", 1, 1)
     from .run_results import record_arrangement_run
     _required_stage("OUTPUT_WRITE_DENIED", record_arrangement_run, work, output, payload["state"], files)
+    _required_stage("OUTPUT_WRITE_DENIED", publish_subtitle_base, work, payload["state"])
     return {**files, "log_path": str(log_path)}
 
 
