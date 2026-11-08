@@ -265,6 +265,8 @@ Examples:
                         choices=["joint-vad", "qwen-force-align", "moss-native"],
                         help="Detect-stage pipeline (default: joint-vad; MOSS ASR requires moss-native)")
     parser.add_argument("--qwen-align-endpoint", default="http://127.0.0.1:8007")
+    parser.add_argument("--uvr-enabled", action="store_true", help="Prepare a separate UVR analysis track before VAD/ASR")
+    parser.add_argument("--uvr-endpoint", default="http://127.0.0.1:8008")
     parser.add_argument("--moss-recalibrate", action="store_true",
                         help="Experimental: verify MOSS acoustic split boundaries by re-recognizing both sides with MOSS and recompute rejected boundaries")
     parser.add_argument("--vad-backend", choices=["fsmn-vad", "asmr-vad"], default="fsmn-vad")
@@ -671,6 +673,8 @@ Examples:
         detect_enabled=args.detect_stage,
         sentence_aligner=args.sentence_aligner,
         qwen_align_endpoint=args.qwen_align_endpoint,
+        uvr_enabled=args.uvr_enabled,
+        uvr_endpoint=args.uvr_endpoint,
         moss_recalibrate=args.moss_recalibrate,
         vad_backend=args.vad_backend,
         vad_endpoint=args.vad_endpoint,

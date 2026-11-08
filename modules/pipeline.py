@@ -99,7 +99,10 @@ def _clean_previous_run(output_dir: str) -> int:
 
 
 def _serialize_parsed_vtt_block(block) -> dict:
+    from .tts.references import parent_span
+    parent_id, parent_start, parent_end = parent_span(block)
     row = {
+        "source_block_id": parent_id, "source_start_ms": parent_start, "source_end_ms": parent_end,
         "index": block.index,
         "start_ms": block.start_ms,
         "end_ms": block.end_ms,
@@ -438,6 +441,8 @@ def run_pipeline(
     detect_enabled: Optional[bool] = None,
     skip_short_translations: bool = True,
     moss_recalibrate: bool = False,
+    uvr_enabled: bool = False,
+    uvr_endpoint: str = "http://127.0.0.1:8008",
 ) -> dict:
     from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature, validate_detect_selection
     from .vad.stage import run_analysis_stage
@@ -546,10 +551,15 @@ def run_pipeline(
             "split_window_sec": vad_split_window_sec,
             "split_overlap_sec": vad_split_overlap_sec,
         })
+        from .audio_preprocessing import create_audio_preprocessor
+        preparation = create_audio_preprocessor("uvr" if uvr_enabled and not vtt_path else "original",
+                                               **({"endpoint": uvr_endpoint} if uvr_enabled and not vtt_path else {}))
+        analysis_audio = _required_stage("AUDIO_DSP_FAILED", preparation.prepare, audio_path, Path(output_dir))
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
                 "stage_contract_version": 8,
+                "analysis_audio": analysis_audio.identity,
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
                 "non_japanese_filter": _non_japanese_filter_policy() if non_japanese_filter_enabled else "disabled",
@@ -594,21 +604,21 @@ def run_pipeline(
                 document_adapter = adapter if isinstance(adapter, DocumentASRAdapter) else None
                 needs_project_vad = document_adapter is None or document_adapter.uses_project_vad()
                 if detect_enabled:
-                    detect_stage = create_detect_stage(detect_config, audio_path)
+                    detect_stage = create_detect_stage(detect_config, analysis_audio.path)
                     if needs_project_vad:
                         final_slices, _ = run_analysis_stage(
-                            audio_path, vad_cfg, output_dir)
+                            analysis_audio.path, vad_cfg, output_dir)
                     else:
                         final_slices = []
                 else:
-                    final_slices = _run_vad_stage(audio_path, vad_cfg, output_dir) if needs_project_vad else []
+                    final_slices = _run_vad_stage(analysis_audio.path, vad_cfg, output_dir) if needs_project_vad else []
                 if needs_project_vad and not final_slices:
                     from .error import VadError, descriptor
                     raise VadError(descriptor("VAD_NO_SPEECH"))
                 elif document_adapter is not None:
                     from .asr.no_speech import ASRNoSpeechError
                     try:
-                        result = asyncio.run(document_adapter.transcribe_document(audio_path, final_slices))
+                        result = asyncio.run(document_adapter.transcribe_document(analysis_audio.path, final_slices))
                     except ASRNoSpeechError:
                         blocks = []
                         asr_output_language = asr_kwargs.get(
@@ -625,7 +635,7 @@ def run_pipeline(
                         print(f"       [asr] 服务来源 {result.source}，时间轴 {result.timeline_source}")
                 else:
                     blocks = transcribe_slices(
-                        audio_path, asr_backend, asr_kwargs,
+                        analysis_audio.path, asr_backend, asr_kwargs,
                         output_dir, final_slices, max_workers=asr_max_concurrent,
                     )
                     asr_output_language = "ja"
@@ -818,11 +828,13 @@ def run_pipeline(
         work_dir = intermediate_dir(output_dir, "chunk_0")
         os.makedirs(work_dir, exist_ok=True)
 
+        from .tts.references import supports_parent_reference
         segments = _required_stage("AUDIO_SPLIT_FAILED", split_audio,
             audio_path,
             blocks,
             os.path.join(work_dir, "01_segments"),
             max_workers=pool_cfg.split_workers,
+            include_asr_blocks=supports_parent_reference(tts_backend, tts_backend_kwargs),
         )
 
         def _tts_progress_callback(done, total_count):

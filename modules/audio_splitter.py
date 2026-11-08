@@ -49,6 +49,7 @@ def split_audio(
     output_dir: str,
     prefix: str = "seg",
     max_workers: int = 1,
+    include_asr_blocks: bool = False,
 ) -> list[dict]:
     """Decode once and write one PCM slice per subtitle block.
 
@@ -72,6 +73,7 @@ def split_audio(
     _normalize_audio(audio_path, normalized_path)
 
     segments: list[dict] = []
+    written_parents: set[Path] = set()
     try:
         with wave.open(normalized_path, "rb") as source:
             frame_rate = source.getframerate()
@@ -106,7 +108,24 @@ def split_audio(
                     target.setparams(params)
                     target.writeframes(speech_frames)
 
+                parent = {}
+                if include_asr_blocks:
+                    from .tts.references import parent_span, block_reference_path
+                    identity, parent_start, parent_end = parent_span(block)
+                    if not 0 <= parent_start < parent_end <= total_duration_ms:
+                        raise ValueError("ASR block reference is outside the source timeline")
+                    parent_path = block_reference_path(output_dir, identity, parent_start, parent_end)
+                    if parent_path not in written_parents:
+                        source.setpos(round(parent_start * frame_rate / 1000))
+                        with wave.open(str(parent_path), "wb") as target:
+                            target.setparams(params)
+                            target.writeframes(source.readframes(round(parent_end * frame_rate / 1000)
+                                                                 - round(parent_start * frame_rate / 1000)))
+                        written_parents.add(parent_path)
+                    parent = {"asr_block_file": str(parent_path), "tts_context": {
+                        "source_block_id": identity, "source_start_ms": parent_start, "source_end_ms": parent_end}}
                 segments.append({
+                    **parent,
                     "index": idx,
                     "segment_id": str(block.index),
                     "speech_file": speech_path,

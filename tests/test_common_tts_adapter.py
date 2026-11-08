@@ -68,6 +68,20 @@ class ManifestTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_parent_audio_is_sent_only_when_the_plugin_selects_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.wav"
+            source.write_bytes(wav_bytes())
+            manifest = descriptor()
+            manifest["parameters"]["properties"]["reference_scope"] = {
+                "type": "string", "enum": ["sentence", "asr_block"], "default": "sentence"}
+            segment = {"index": 0, "text": "中文", "speech_file": str(source), "asr_block_file": str(source)}
+            for scope, expected in (("sentence", {"source_speech"}), ("asr_block", {"source_speech", "source_asr_block"})):
+                adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin", parameters={"reference_scope": scope})
+                bound = adapter.bind_segment(segment)
+                self.assertEqual({asset.role for asset in bound._request.assets}, expected)
+            self.assertIn("asr_block_file", segment)
+
     def test_required_segment_roles_are_checked_after_reference_preflight_before_http(self):
         manifest = descriptor()
         manifest["capabilities"]["required_assets"] = ["source_speech", "source_segment", "voice_reference"]

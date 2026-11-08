@@ -31,6 +31,13 @@ async def synthesize_edit(work: Path, row: dict, voice: TtsVoice, adapter=None) 
     if not row["text"].strip():
         raise ArrangementError("中文字幕为空，无法重新生成")
     adapter = adapter or get_tts_adapter(voice.backend, voice.kwargs)
+    from ..tts.references import arrangement_segment
+    segment = arrangement_segment(work, row)
+    if callable(getattr(type(adapter), "bind_segment", None)):
+        adapter = adapter.bind_segment(segment)
+    if callable(getattr(type(adapter), "for_segment", None)):
+        from ..tts.models import TTSSegmentContext
+        adapter = adapter.for_segment(TTSSegmentContext.from_segment(segment))
     directory = work / "arrangement/audio"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{uuid4().hex}{adapter.output_extension}"

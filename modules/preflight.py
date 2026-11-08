@@ -317,9 +317,15 @@ async def _check_alignment(config):
                           key="qwenAlignEndpoint", default="http://127.0.0.1:8007")
 
 
+async def _check_uvr(config):
+    await _check_analysis(config, service="uvr", api_version="uvr/1",
+                          key="uvrEndpoint", default="http://127.0.0.1:8008")
+
+
 _CHECKS: dict[str, Callable[[Mapping[str, Any]], Awaitable[None]]] = {
     "vad": _check_vad,
     "alignment": _check_alignment,
+    "uvr": _check_uvr,
     "llm": _check_llm,
     "asr": _check_asr,
     "chickenrice": _check_chickenrice,

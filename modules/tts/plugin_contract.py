@@ -62,7 +62,8 @@ class TTSSynthesisRequest:
         """Copy the stage return value; never retain caller-owned dictionaries."""
         assets = tuple(AudioAsset.from_file(role, segment[key], role)
                        for role, key in (("source_speech", "speech_file"),
-                                         ("source_segment", "segment_file")) if segment.get(key))
+                                         ("source_segment", "segment_file"),
+                                         ("source_asr_block", "asr_block_file")) if segment.get(key))
         return cls(str(segment.get("segment_id", segment["index"])), segment["index"],
                    segment["text"], segment["text"], segment.get("speaker"),
                    segment.get("source_text") or None,
