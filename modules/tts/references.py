@@ -17,13 +17,12 @@ def write_reference_profile(work: str | Path, source: str, reference: str, ident
 
 
 def supports_parent_reference(backend: str, settings: dict | None) -> bool:
-    """Prepare optional assets only for manifests advertising this reference scope."""
+    """Prepare parent audio only when the plugin declares that asset role."""
     if backend != "common-tts":
         return False
-    settings = settings or {}
-    schema = settings.get("manifest", {}).get("parameters", {}).get("properties", {})
-    return (settings.get("parameters", {}).get("reference_scope") == "asr_block"
-            or "asr_block" in schema.get("reference_scope", {}).get("enum", ()))
+    capabilities = (settings or {}).get("manifest", {}).get("capabilities", {})
+    return any("source_asr_block" in capabilities.get(key, ())
+               for key in ("required_assets", "optional_assets"))
 
 
 def block_reference_path(directory: str | Path, identity: str, start_ms: int, end_ms: int) -> Path:

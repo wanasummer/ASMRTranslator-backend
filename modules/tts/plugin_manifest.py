@@ -17,9 +17,6 @@ def _defaults(schema: dict, value):
     value = copy.deepcopy(value)
     if not isinstance(schema, dict):
         return value
-    aliases = schema.get("x-value-aliases", {})
-    if isinstance(value, str) and isinstance(aliases, dict) and value in aliases:
-        value = copy.deepcopy(aliases[value])
     if isinstance(value, dict):
         for key, child in schema.get("properties", {}).items():
             if key not in value and isinstance(child, dict) and "default" in child:
@@ -72,9 +69,10 @@ def validate_manifest(value: dict) -> dict:
             raise ValueError("当前宿主仅支持 segment 执行模式")
         if capabilities.get("text_policy", "strip_tags") not in ("strip_tags", "preserve"):
             raise ValueError("text_policy 无效")
-        required = capabilities.get("required_assets", [])
-        if not isinstance(required, list) or not all(isinstance(v, str) for v in required):
-            raise ValueError("required_assets 必须为字符串列表")
+        for key in ("required_assets", "optional_assets"):
+            roles = capabilities.get(key, [])
+            if not isinstance(roles, list) or not all(isinstance(v, str) for v in roles):
+                raise ValueError(f"{key} 必须为字符串列表")
         execution = value.setdefault("execution", {})
         if not isinstance(execution.get("cache", True), bool):
             raise ValueError("execution.cache 必须为布尔值")

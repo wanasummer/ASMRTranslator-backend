@@ -68,35 +68,23 @@ class ManifestTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
-    def test_parent_audio_is_sent_only_when_the_plugin_selects_it(self):
+    def test_parent_audio_is_sent_only_when_declared_by_the_plugin(self):
+        from modules.tts.references import supports_parent_reference
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "source.wav"
             source.write_bytes(wav_bytes())
-            manifest = descriptor()
-            manifest["parameters"]["properties"]["reference_scope"] = {
-                "type": "string", "enum": ["sentence", "asr_block"], "default": "sentence"}
             segment = {"index": 0, "text": "中文", "speech_file": str(source), "asr_block_file": str(source)}
-            for scope, expected in (("sentence", {"source_speech"}), ("asr_block", {"source_speech", "source_asr_block"})):
-                adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin", parameters={"reference_scope": scope})
+            for declared in (False, True):
+                manifest = descriptor()
+                if declared:
+                    manifest["capabilities"]["optional_assets"] = ["source_asr_block"]
+                self.assertEqual(supports_parent_reference("common-tts", {"manifest": manifest}), declared)
+                adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin")
                 bound = adapter.bind_segment(segment)
+                expected = {"source_speech", "source_asr_block"} if declared else {"source_speech"}
                 self.assertEqual({asset.role for asset in bound._request.assets}, expected)
+                self.assertNotIn("reference_scope", bound.cache_inputs()["parameters"])
             self.assertIn("asr_block_file", segment)
-
-    def test_declared_legacy_scope_migrates_before_binding_and_cache_without_mutation(self):
-        with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / "uvr-parent.wav"
-            source.write_bytes(wav_bytes())
-            manifest = descriptor()
-            manifest["parameters"]["properties"]["reference_scope"] = {
-                "type": "string", "enum": ["asr_block"], "default": "asr_block",
-                "x-value-aliases": {"sentence": "asr_block"}}
-            settings = {"reference_scope": "sentence"}
-            adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin", parameters=settings)
-            bound = adapter.bind_segment({"index": 0, "text": "中文", "speech_file": str(source),
-                                          "asr_block_file": str(source)})
-            self.assertIn("source_asr_block", {a.role for a in bound._request.assets})
-            self.assertEqual(bound.cache_inputs()["parameters"]["reference_scope"], "asr_block")
-            self.assertEqual(settings, {"reference_scope": "sentence"})
 
     def test_required_segment_roles_are_checked_after_reference_preflight_before_http(self):
         manifest = descriptor()

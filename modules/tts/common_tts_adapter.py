@@ -67,9 +67,9 @@ class CommonTTSAdapter(TTSAdapter):
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.manifest["execution"]["max_concurrent"])
         adapter = copy.copy(self)
-        parameters = resolve_parameters(self.manifest, self.parameters, segment.get("tts_overrides", {}))
+        from .references import supports_parent_reference
         bound = dict(segment)
-        if parameters.get("reference_scope") != "asr_block":
+        if not supports_parent_reference("common-tts", {"manifest": self.manifest}):
             bound.pop("asr_block_file", None)
         adapter._request = TTSSynthesisRequest.from_segment(bound)
         return adapter
