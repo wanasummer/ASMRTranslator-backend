@@ -553,7 +553,8 @@ def run_pipeline(
         })
         from .audio_preprocessing import create_audio_preprocessor
         preparation = create_audio_preprocessor("uvr" if uvr_enabled and not vtt_path else "original",
-                                               **({"endpoint": uvr_endpoint} if uvr_enabled and not vtt_path else {}))
+                                               **({"endpoint": uvr_endpoint, "progress": lambda label, current, total:
+                                                   print_progress("uvr", label, current, total)} if uvr_enabled and not vtt_path else {}))
         analysis_audio = _required_stage("AUDIO_DSP_FAILED", preparation.prepare, audio_path, Path(output_dir))
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
