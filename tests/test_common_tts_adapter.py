@@ -82,6 +82,22 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual({asset.role for asset in bound._request.assets}, expected)
             self.assertIn("asr_block_file", segment)
 
+    def test_declared_legacy_scope_migrates_before_binding_and_cache_without_mutation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "uvr-parent.wav"
+            source.write_bytes(wav_bytes())
+            manifest = descriptor()
+            manifest["parameters"]["properties"]["reference_scope"] = {
+                "type": "string", "enum": ["asr_block"], "default": "asr_block",
+                "x-value-aliases": {"sentence": "asr_block"}}
+            settings = {"reference_scope": "sentence"}
+            adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin", parameters=settings)
+            bound = adapter.bind_segment({"index": 0, "text": "中文", "speech_file": str(source),
+                                          "asr_block_file": str(source)})
+            self.assertIn("source_asr_block", {a.role for a in bound._request.assets})
+            self.assertEqual(bound.cache_inputs()["parameters"]["reference_scope"], "asr_block")
+            self.assertEqual(settings, {"reference_scope": "sentence"})
+
     def test_required_segment_roles_are_checked_after_reference_preflight_before_http(self):
         manifest = descriptor()
         manifest["capabilities"]["required_assets"] = ["source_speech", "source_segment", "voice_reference"]

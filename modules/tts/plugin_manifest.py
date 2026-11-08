@@ -17,6 +17,9 @@ def _defaults(schema: dict, value):
     value = copy.deepcopy(value)
     if not isinstance(schema, dict):
         return value
+    aliases = schema.get("x-value-aliases", {})
+    if isinstance(value, str) and isinstance(aliases, dict) and value in aliases:
+        value = copy.deepcopy(aliases[value])
     if isinstance(value, dict):
         for key, child in schema.get("properties", {}).items():
             if key not in value and isinstance(child, dict) and "default" in child:
