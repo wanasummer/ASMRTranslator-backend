@@ -93,6 +93,50 @@ class JapaneseCleaner(ABC):
 
 
 @dataclass(frozen=True)
+class NonJapaneseFilterRecord:
+    """Auditable result for one ASR block checked for Japanese content."""
+
+    index: int
+    text: str
+    kept: bool
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "text": self.text,
+            "kept": self.kept,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class NonJapaneseFilterResult:
+    """Output of capNonJapaneseFilter; removed blocks keep no timeline entry.
+
+    Kept blocks are copies that preserve their original ``index`` so later
+    stages can still trace them to raw ASR output.
+    """
+
+    blocks: tuple[Any, ...]
+    records: tuple[NonJapaneseFilterRecord, ...]
+    enabled: bool
+
+    @property
+    def removed_count(self) -> int:
+        return sum(not record.kept for record in self.records)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "total": len(self.records),
+            "kept": len(self.records) - self.removed_count,
+            "removed": self.removed_count,
+            "records": [record.as_dict() for record in self.records],
+        }
+
+
+@dataclass(frozen=True)
 class InterjectionRecord:
     """Auditable result for one translated block checked for short-interjection skip."""
 

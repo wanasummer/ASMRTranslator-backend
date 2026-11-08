@@ -255,6 +255,9 @@ Examples:
                              "modules.cleaning (default: mecab-regex)")
     parser.add_argument("--no-japanese-clean", action="store_true",
                         help="Disable Japanese ASR cleanup before translation")
+    parser.add_argument("--no-non-japanese-filter", action="store_true",
+                        help="Keep Japanese ASR blocks that contain no Japanese text "
+                             "(default: drop them before cleanup)")
     parser.add_argument("--detect-stage", "--vad-sentence-realignment-beta",
                         dest="detect_stage", action="store_true",
                         help="Enable Japanese sentence detection after ASR and before cleanup")
@@ -663,6 +666,7 @@ Examples:
         asr_max_concurrent=args.asr_max_concurrent,
         japanese_cleaner=args.japanese_cleaner,
         japanese_clean_enabled=not args.no_japanese_clean,
+        non_japanese_filter_enabled=not args.no_non_japanese_filter,
         vad_enabled=not args.no_vad,
         detect_enabled=args.detect_stage,
         sentence_aligner=args.sentence_aligner,

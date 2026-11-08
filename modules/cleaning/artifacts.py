@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from ..storage import save_json, save_text
-from .contracts import JapaneseCleaningResult
+from .contracts import JapaneseCleaningResult, NonJapaneseFilterResult
 
 
 def _timestamp(ms: int) -> str:
@@ -35,3 +35,11 @@ def write_cleaning_artifacts(result: JapaneseCleaningResult, output_dir: str) ->
     vtt_path = save_text(vtt_path, "\n".join(lines))
     report_path = save_json(report_path, result.as_dict())
     return {"vtt": vtt_path, "report": report_path}
+
+
+def write_non_japanese_filter_report(result: NonJapaneseFilterResult, output_dir: str) -> str:
+    """Write the audit report of blocks dropped for lacking Japanese text; return its path."""
+    from ..storage import initialize_project
+    initialize_project(output_dir)
+    path = os.path.join(output_dir, "asr_subtitles", "non_japanese_filter_report.json")
+    return save_json(path, result.as_dict())

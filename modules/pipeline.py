@@ -217,6 +217,12 @@ def _create_japanese_cleaner_with_fallback(name: str, *, enabled: bool = True):
         ) from error
 
 
+def _non_japanese_filter_policy() -> str:
+    from .cleaning.capabilities.capNonJapaneseFilter import POLICY_VERSION
+
+    return POLICY_VERSION
+
+
 def _format_vtt_timestamp(ms: int) -> str:
     """Format milliseconds as a WebVTT timestamp (HH:MM:SS.mmm)."""
     ms = max(0, int(ms))
@@ -411,6 +417,7 @@ def run_pipeline(
     asr_max_concurrent: int = 3,
     japanese_cleaner: str = "mecab-regex",
     japanese_clean_enabled: bool = True,
+    non_japanese_filter_enabled: bool = True,
     vad_enabled: bool = True,
     vad_max_end_silence_time: int = 1500,
     vad_max_single_segment_time: int = 25000,
@@ -545,6 +552,7 @@ def run_pipeline(
                 "stage_contract_version": 8,
                 "audio": file_digest(audio_path), "backend": asr_backend,
                 "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
+                "non_japanese_filter": _non_japanese_filter_policy() if non_japanese_filter_enabled else "disabled",
                 "detect": detect_cache_signature(detect_config) if detect_enabled else None,
                 "vad": vad_cfg,
             })
@@ -641,11 +649,25 @@ def run_pipeline(
             if asr_output_language == "ja" and not asr_needs_japanese_cleanup:
                 print("       [asr] 使用服务返回的日语字幕和时间轴，直接进入 LLM 阶段")
             elif asr_output_language == "ja":
-                # Japanese cleanup consumes only Japanese ASR output. Empty
-                # blocks remain on the authored timeline with skip_tts=True.
+                # Blocks with no Japanese text are dropped first; Japanese
+                # cleanup then keeps blocks it empties on the timeline with
+                # skip_tts=True.
                 from .cleaning import (
+                    NonJapaneseFilterCapability,
+                    NonJapaneseFilterConfig,
                     write_cleaning_artifacts,
+                    write_non_japanese_filter_report,
                 )
+                filter_result = NonJapaneseFilterCapability(
+                    NonJapaneseFilterConfig(enabled=non_japanese_filter_enabled)
+                ).filter(blocks)
+                blocks = list(filter_result.blocks)
+                if filter_result.enabled:
+                    report = write_non_japanese_filter_report(filter_result, output_dir)
+                    print(
+                        f"       [non-japanese-filter] 原始 {len(filter_result.records)} 段，"
+                        f"移除无日语片段 {filter_result.removed_count} 段: {report}"
+                    )
                 cleaner = _create_japanese_cleaner_with_fallback(japanese_cleaner) if japanese_clean_enabled else _create_japanese_cleaner_with_fallback(japanese_cleaner, enabled=False)
                 cleaning_result = cleaner.clean(blocks)
                 blocks = cleaning_result.blocks

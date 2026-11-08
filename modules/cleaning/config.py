@@ -26,6 +26,17 @@ class JapaneseCleanConfig:
 
 
 @dataclass(frozen=True)
+class NonJapaneseFilterConfig:
+    """Configuration for dropping ASR blocks without any Japanese text (capNonJapaneseFilter)."""
+
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("NonJapaneseFilterConfig.enabled 必须是布尔值")
+
+
+@dataclass(frozen=True)
 class InterjectionSkipConfig:
     """Configuration for post-translation Chinese short-interjection skip (capInterjectionSkip)."""
 

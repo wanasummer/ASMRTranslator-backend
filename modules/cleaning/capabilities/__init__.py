@@ -15,6 +15,7 @@ from .capJapaneseClean import (
     create_japanese_cleaner,
     register_japanese_cleaner,
 )
+from .capNonJapaneseFilter import NonJapaneseFilterCapability, contains_japanese
 
 __all__ = [
     "InterjectionSkipCapability",
@@ -22,8 +23,10 @@ __all__ = [
     "KEEP_GREETING_SURFACES",
     "MecabRegexJapaneseCleaner",
     "MecabTokenizer",
+    "NonJapaneseFilterCapability",
     "RegexJapaneseCleaner",
     "RegexTokenizer",
+    "contains_japanese",
     "count_cjk_chars",
     "create_japanese_cleaner",
     "mark_interjection_skips",

@@ -1,20 +1,22 @@
 """Unified cleaning domain with independently toggleable capabilities (capXxx)."""
 
-from .artifacts import write_cleaning_artifacts
+from .artifacts import write_cleaning_artifacts, write_non_japanese_filter_report
 from .capabilities import (
     InterjectionSkipCapability,
     JapaneseCleanCapability,
     KEEP_GREETING_SURFACES,
     MecabRegexJapaneseCleaner,
     MecabTokenizer,
+    NonJapaneseFilterCapability,
     RegexJapaneseCleaner,
     RegexTokenizer,
+    contains_japanese,
     count_cjk_chars,
     create_japanese_cleaner,
     mark_interjection_skips,
     register_japanese_cleaner,
 )
-from .config import InterjectionSkipConfig, JapaneseCleanConfig
+from .config import InterjectionSkipConfig, JapaneseCleanConfig, NonJapaneseFilterConfig
 from .contracts import (
     CleaningRecord,
     InterjectionRecord,
@@ -24,6 +26,8 @@ from .contracts import (
     JapaneseCleaningResult,
     MorphToken,
     MorphTokenizer,
+    NonJapaneseFilterRecord,
+    NonJapaneseFilterResult,
 )
 
 __all__ = [
@@ -42,11 +46,17 @@ __all__ = [
     "MecabTokenizer",
     "MorphToken",
     "MorphTokenizer",
+    "NonJapaneseFilterCapability",
+    "NonJapaneseFilterConfig",
+    "NonJapaneseFilterRecord",
+    "NonJapaneseFilterResult",
     "RegexJapaneseCleaner",
     "RegexTokenizer",
+    "contains_japanese",
     "count_cjk_chars",
     "create_japanese_cleaner",
     "mark_interjection_skips",
     "register_japanese_cleaner",
     "write_cleaning_artifacts",
+    "write_non_japanese_filter_report",
 ]

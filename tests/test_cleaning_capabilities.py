@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from modules.cleaning import (
     InterjectionSkipCapability,
@@ -14,6 +15,10 @@ from modules.cleaning import (
     JapaneseCleanConfig,
     MecabRegexJapaneseCleaner,
     MorphToken,
+    NonJapaneseFilterCapability,
+    NonJapaneseFilterConfig,
+    contains_japanese,
+    write_non_japanese_filter_report,
 )
 from modules.pipeline import _create_japanese_cleaner_with_fallback
 from modules.vtt_parser import VTTBlock
@@ -30,6 +35,9 @@ class CleaningArchitectureTests(unittest.TestCase):
             with self.subTest(config="InterjectionSkipConfig", kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     InterjectionSkipConfig(**kwargs)
+
+        with self.assertRaises(ValueError):
+            NonJapaneseFilterConfig(enabled="yes")
 
     def test_cleaning_package_does_not_import_orchestrator_or_downstream_domains(self):
         directory = Path(__file__).resolve().parents[1] / "modules" / "cleaning"
@@ -164,6 +172,99 @@ class CapInterjectionSkipTests(unittest.TestCase):
         self.assertEqual(result.flagged_count, 0)
         self.assertEqual([b.skip_tts for b in result.blocks], [True, False])
         self.assertEqual([r.reason for r in result.records], ["disabled", "disabled"])
+
+
+class CapNonJapaneseFilterTests(unittest.TestCase):
+    def test_contains_japanese_requires_kana(self):
+        for text in ("こんばんは", "カタカナ", "ｶﾀｶﾅ", "お布団", "本当に", "OK、いいよ"):
+            with self.subTest(text=text):
+                self.assertTrue(contains_japanese(text))
+        for text in ("", "   ", "Thank you for watching!", "♪～", "...", "ーー", "・", "123",
+                     "布団", "(笑)", "嗯嗯", "啊、哈", "々"):
+            with self.subTest(text=text):
+                self.assertFalse(contains_japanese(text))
+
+    def test_drops_blocks_without_japanese_and_preserves_kept_identity(self):
+        source = [
+            VTTBlock(0, 0, 1000, "こんばんは"),
+            VTTBlock(1, 1000, 2000, "Thank you for watching!"),
+            VTTBlock(2, 2000, 3000, ""),
+            VTTBlock(3, 3000, 4000, "♪", speaker="S1"),
+            VTTBlock(4, 4000, 5000, "お布団", speaker="S2"),
+            VTTBlock(5, 5000, 6000, "嗯嗯"),
+        ]
+        result = NonJapaneseFilterCapability(NonJapaneseFilterConfig(enabled=True)).filter(source)
+
+        self.assertTrue(result.enabled)
+        self.assertEqual([b.index for b in result.blocks], [0, 4])
+        self.assertEqual([b.speaker for b in result.blocks], [None, "S2"])
+        self.assertIsNot(result.blocks[0], source[0])
+        self.assertEqual(len(source), 6)
+        self.assertEqual(result.removed_count, 4)
+        self.assertEqual(
+            [r.reason for r in result.records],
+            ["contains_kana", "no_kana", "empty", "no_kana", "contains_kana", "no_kana"],
+        )
+        self.assertEqual(result.as_dict()["kept"], 2)
+
+    def test_disabled_filter_keeps_every_block(self):
+        source = [VTTBlock(0, 0, 1000, "Hello"), VTTBlock(1, 1000, 2000, "")]
+        result = NonJapaneseFilterCapability(NonJapaneseFilterConfig(enabled=False)).filter(source)
+
+        self.assertFalse(result.enabled)
+        self.assertEqual([b.text for b in result.blocks], ["Hello", ""])
+        self.assertEqual(result.removed_count, 0)
+        self.assertEqual([r.reason for r in result.records], ["disabled", "disabled"])
+
+    def test_report_is_persisted_in_project_database(self):
+        from modules.storage import read_json
+
+        result = NonJapaneseFilterCapability().filter([VTTBlock(0, 0, 1000, "Hello")])
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_non_japanese_filter_report(result, directory)
+            self.assertEqual(read_json(path)["removed"], 1)
+
+
+class NonJapaneseFilterPipelineHandoffTests(unittest.TestCase):
+    def _cleaner_input(self, **pipeline_kwargs) -> list[str]:
+        from modules.asr.base import DocumentASRAdapter
+        from modules.asr.chickenrice_adapter import ChickenRiceSubtitleResult
+        from modules.error import PipelineError
+        from modules.pipeline import run_pipeline
+
+        blocks = [
+            VTTBlock(0, 0, 1000, "こんばんは"),
+            VTTBlock(1, 1000, 2000, "Thank you for watching!"),
+            VTTBlock(2, 2000, 3000, "お布団"),
+            VTTBlock(3, 3000, 4000, "嗯啊"),
+        ]
+        adapter = Mock(spec=DocumentASRAdapter)
+        adapter.uses_project_vad.return_value = False
+        adapter.transcribe_document = AsyncMock(return_value=ChickenRiceSubtitleResult(
+            "ja", blocks, "chickenrice", "chickenrice_vad"))
+
+        class StopAfterHandoff(Exception):
+            pass
+
+        cleaner = Mock(name="cleaner")
+        cleaner.clean.side_effect = StopAfterHandoff()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("modules.asr.create_asr", return_value=adapter), \
+                patch("modules.pipeline._create_japanese_cleaner_with_fallback", return_value=cleaner):
+            with self.assertRaises(PipelineError) as failure:
+                run_pipeline("unused.wav", "", directory, asr_backend="chickenrice",
+                             asr_kwargs={"language": "ja"}, **pipeline_kwargs)
+        self.assertIsInstance(failure.exception.cause, StopAfterHandoff)
+        return [block.text for block in cleaner.clean.call_args.args[0]]
+
+    def test_japanese_cleanup_receives_only_filtered_blocks_by_default(self):
+        self.assertEqual(self._cleaner_input(), ["こんばんは", "お布団"])
+
+    def test_disabled_filter_passes_every_block_to_cleanup(self):
+        self.assertEqual(
+            self._cleaner_input(non_japanese_filter_enabled=False),
+            ["こんばんは", "Thank you for watching!", "お布団", "嗯啊"],
+        )
 
 
 if __name__ == "__main__":
