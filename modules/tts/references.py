@@ -5,6 +5,17 @@ from hashlib import sha256
 from pathlib import Path
 
 
+def write_reference_profile(work: str | Path, source: str, reference: str, identity: str) -> None:
+    """Persist the conditioning source separately from extraction and synthesis."""
+    from ..storage import save_json
+    from ..task_cache import file_digest
+    save_json(str(Path(work) / "chunk_0/01_segments/reference_profile.json"), {
+        "policy": 1, "source_path": source, "reference_path": reference,
+        "analysis_identity": identity, "reference_sha256": file_digest(reference),
+        "processed": Path(source).resolve() != Path(reference).resolve(),
+    })
+
+
 def supports_parent_reference(backend: str, settings: dict | None) -> bool:
     """Prepare optional assets only for manifests advertising this reference scope."""
     if backend != "common-tts":
@@ -35,6 +46,11 @@ def parent_span(block) -> tuple[str, int, int]:
 def arrangement_segment(work: Path, row: dict) -> dict:
     """Rebind immutable generation assets for a regenerated studio fragment."""
     segment = dict(row)
+    from ..storage import contains, read_json
+    profile_path = work / "chunk_0/01_segments/reference_profile.json"
+    if contains(profile_path):
+        profile = read_json(profile_path)
+        segment["tts_context"] = {"reference_audio_processing": "processed" if profile["processed"] else "original"}
     directory = work / "chunk_0/01_segments"
     index = row["index"]
     for key, prefix in (("speech_file", "speech"), ("segment_file", "seg")):
@@ -45,5 +61,5 @@ def arrangement_segment(work: Path, row: dict) -> dict:
         path = block_reference_path(directory, row["source_block_id"], row["source_start_ms"], row["source_end_ms"])
         if path.is_file():
             segment["asr_block_file"] = str(path)
-            segment["tts_context"] = {key: row[key] for key in ("source_block_id", "source_start_ms", "source_end_ms")}
+            segment.setdefault("tts_context", {}).update({key: row[key] for key in ("source_block_id", "source_start_ms", "source_end_ms")})
     return segment

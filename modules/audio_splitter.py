@@ -3,6 +3,7 @@
 import os
 import subprocess
 import wave
+from contextlib import ExitStack
 from pathlib import Path
 
 from .pink_segments import calculate_pink_segments
@@ -50,8 +51,12 @@ def split_audio(
     prefix: str = "seg",
     max_workers: int = 1,
     include_asr_blocks: bool = False,
+    reference_audio_path: str | None = None,
 ) -> list[dict]:
-    """Decode once and write one PCM slice per subtitle block.
+    """Write original coverage and references from independently selected audio.
+
+    ``reference_audio_path`` supplies timeline-preserving processed speech for
+    automatic TTS conditioning. Original pink audio always uses ``audio_path``.
 
     ``max_workers`` is retained for API compatibility. PCM slicing is kept
     sequential because the spans are ordered; concurrent disk readers add
@@ -70,12 +75,22 @@ def split_audio(
             block.max_allowed_tts_ms = pink.max_allowed_tts_ms
 
     normalized_path = os.path.join(output_dir, "_source_24k_stereo.wav")
+    reference_path = os.path.join(output_dir, "_reference_24k_stereo.wav")
     _normalize_audio(audio_path, normalized_path)
 
     segments: list[dict] = []
     written_parents: set[Path] = set()
     try:
-        with wave.open(normalized_path, "rb") as source:
+        with ExitStack() as stack:
+            source = stack.enter_context(wave.open(normalized_path, "rb"))
+            reference = source
+            if reference_audio_path is not None and os.path.abspath(reference_audio_path) != os.path.abspath(audio_path):
+                _normalize_audio(reference_audio_path, reference_path)
+                reference = stack.enter_context(wave.open(reference_path, "rb"))
+                if ((reference.getframerate(), reference.getnchannels(), reference.getsampwidth()) !=
+                        (source.getframerate(), source.getnchannels(), source.getsampwidth()) or
+                        abs(reference.getnframes() - source.getnframes()) > round(source.getframerate() / 1000)):
+                    raise ValueError("TTS reference audio does not match the original timeline")
             frame_rate = source.getframerate()
             frame_count = source.getnframes()
             params = source.getparams()
@@ -99,13 +114,13 @@ def split_audio(
 
                 # Pink spans contain surrounding silence and may include another
                 # speaker. Emotion conditioning must use the subtitle speech span.
-                speech_start = min(frame_count, round(max(0, block.start_ms) * frame_rate / 1000))
-                speech_end = min(frame_count, round(max(0, block.end_ms) * frame_rate / 1000))
-                source.setpos(speech_start)
-                speech_frames = source.readframes(max(0, speech_end - speech_start))
+                speech_start = min(reference.getnframes(), round(max(0, block.start_ms) * frame_rate / 1000))
+                speech_end = min(reference.getnframes(), round(max(0, block.end_ms) * frame_rate / 1000))
+                reference.setpos(speech_start)
+                speech_frames = reference.readframes(max(0, speech_end - speech_start))
                 speech_path = os.path.join(output_dir, f"speech_{idx:04d}.wav")
                 with wave.open(speech_path, "wb") as target:
-                    target.setparams(params)
+                    target.setparams(reference.getparams())
                     target.writeframes(speech_frames)
 
                 parent = {}
@@ -116,16 +131,18 @@ def split_audio(
                         raise ValueError("ASR block reference is outside the source timeline")
                     parent_path = block_reference_path(output_dir, identity, parent_start, parent_end)
                     if parent_path not in written_parents:
-                        source.setpos(round(parent_start * frame_rate / 1000))
+                        reference.setpos(min(reference.getnframes(), round(parent_start * frame_rate / 1000)))
                         with wave.open(str(parent_path), "wb") as target:
-                            target.setparams(params)
-                            target.writeframes(source.readframes(round(parent_end * frame_rate / 1000)
+                            target.setparams(reference.getparams())
+                            target.writeframes(reference.readframes(round(parent_end * frame_rate / 1000)
                                                                  - round(parent_start * frame_rate / 1000)))
                         written_parents.add(parent_path)
                     parent = {"asr_block_file": str(parent_path), "tts_context": {
                         "source_block_id": identity, "source_start_ms": parent_start, "source_end_ms": parent_end}}
                 segments.append({
                     **parent,
+                    "tts_context": {"reference_audio_processing": "processed" if reference is not source else "original",
+                                    **parent.get("tts_context", {})},
                     "index": idx,
                     "segment_id": str(block.index),
                     "speech_file": speech_path,
@@ -145,9 +162,10 @@ def split_audio(
         # The per-segment WAVs are needed by later stages; the decoded full
         # source is not. Releasing it here avoids retaining ~128 MiB for a
         # 23-minute source until the next run.
-        try:
-            os.remove(normalized_path)
-        except OSError:
-            pass
+        for path in (normalized_path, reference_path):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
     return segments

@@ -117,6 +117,7 @@ class IndexTTSAdapter(TTSAdapter):
 
     def cache_inputs(self) -> dict:
         from dataclasses import asdict
+        from ..task_cache import file_digest
         generation = asdict(self._options) if self._options else {}
         # Credential redaction excludes keys containing "token". Keep these
         # non-secret model limits in the synthesis cache under explicit aliases.
@@ -125,7 +126,9 @@ class IndexTTSAdapter(TTSAdapter):
             if original in generation:
                 generation[alias] = generation.pop(original)
         return {"voice_reference": self._reference_audio,
+                "voice_reference_sha256": file_digest(self._reference_audio) if self._reference_audio and Path(self._reference_audio).is_file() else None,
                 "emotion_reference": self._emotion_reference,
+                "emotion_reference_sha256": file_digest(self._emotion_reference) if self._emotion_reference and Path(self._emotion_reference).is_file() else None,
                 "generation": generation,
                 "emotion_method": self._emotion_method,
                 "emotion_weight": self._emotion_weight}

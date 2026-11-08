@@ -828,14 +828,19 @@ def run_pipeline(
         work_dir = intermediate_dir(output_dir, "chunk_0")
         os.makedirs(work_dir, exist_ok=True)
 
-        from .tts.references import supports_parent_reference
+        from .tts.references import supports_parent_reference, write_reference_profile
         segments = _required_stage("AUDIO_SPLIT_FAILED", split_audio,
             audio_path,
             blocks,
             os.path.join(work_dir, "01_segments"),
             max_workers=pool_cfg.split_workers,
             include_asr_blocks=supports_parent_reference(tts_backend, tts_backend_kwargs),
+            reference_audio_path=analysis_audio.path,
         )
+        if os.path.isfile(analysis_audio.path):
+            _required_stage("OUTPUT_WRITE_DENIED", write_reference_profile, output_dir,
+                            audio_path, analysis_audio.path, analysis_audio.identity)
+        print(f"       [tts-reference] 自动参考使用{'原始音轨' if analysis_audio.identity == 'original' else 'UVR 人声音轨'}，共 {len(segments)} 段")
 
         def _tts_progress_callback(done, total_count):
             print_progress("tts", "正在生成翻译片段", done, total_count)
