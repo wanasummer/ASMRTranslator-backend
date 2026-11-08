@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from modules.arrangement import (ArrangementError, initial_state, load_state, save_state,
-                                 optimize_subtitles, synthesize_edit, prepare_arrangement_plan,
-                                 resolve_replacement, run_editor_request, optimize_fragment,
-                                 pipeline_tts_rates, fit_default_placement, tts_max_rate)
-from modules.arrangement_audio import ArrangementPlan, ArrangementAudioResult, PydubArrangementAdapter, perceived_db, write_arrangement_result
-from modules.arrangement_contracts import ArrangedClip
+from modules.arrangement.assets import pipeline_tts_rates, resolve_replacement, tts_max_rate
+from modules.arrangement.audio import ArrangementPlan, ArrangementAudioResult, PydubArrangementAdapter, perceived_db, write_arrangement_result
+from modules.arrangement.contracts import ArrangedClip, ArrangementError
+from modules.arrangement.editor import run_editor_request
+from modules.arrangement.optimization import optimize_fragment, optimize_subtitles
+from modules.arrangement.plan import fit_default_placement, prepare_arrangement_plan
+from modules.arrangement.state import initial_state, load_state, save_state
+from modules.arrangement.synthesis import synthesize_edit
 from modules.llm import LLMConfig
 from modules.llm.factory import create_capabilities
 from modules.llm.tts_style import build_polish_system
@@ -144,7 +146,7 @@ class ArrangementTests(unittest.TestCase):
         self.state["segments"][0].update(text="新草稿", japanese="新しい原文", volume=.5,
                                           interval={"start": 100, "end": 900})
         self.state.update(loudnessScope="global", globalVolume=1.3)
-        with patch("modules.arrangement.synthesize_edit") as synth:
+        with patch("modules.arrangement.synthesis.synthesize_edit") as synth:
             run_editor_request({"workDir": str(self.work), "action": "save", "state": self.state})
         synth.assert_not_called()
         self.assertEqual(load_state(self.work), self.state)
@@ -196,7 +198,7 @@ class ArrangementTests(unittest.TestCase):
         (cache / "tts_0001.wav").touch()
         self._insert_after_first()
         with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 1000)), \
-             patch("modules.arrangement.synthesize_edit") as synth:
+             patch("modules.arrangement.plan.synthesize_edit") as synth:
             plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
         synth.assert_not_called()
         self.assertEqual([clip.index for clip in plan.clips], [7, 13])
@@ -213,7 +215,7 @@ class ArrangementTests(unittest.TestCase):
         (audio / "new.wav").touch()
         synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": "新增的一句台词"})
         with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 500)), \
-             patch("modules.arrangement.synthesize_edit", synth):
+             patch("modules.arrangement.plan.synthesize_edit", synth):
             plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
         row = synth.call_args.args[1]
         self.assertEqual((row["start_ms"], row["end_ms"], row["source_block_id"]), (1000, 2000, "block-a"))
@@ -226,7 +228,7 @@ class ArrangementTests(unittest.TestCase):
         audio.mkdir(parents=True)
         (audio / "new.wav").touch()
         synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": "新增的一句台词"})
-        with patch("modules.arrangement.synthesize_edit", synth):
+        with patch("modules.arrangement.synthesis.synthesize_edit", synth):
             result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 1,
                                          "state": self.state, "config": {}, "ttsKwargs": {}})
         self.assertEqual(synth.call_args.args[1]["index"], 14)
@@ -332,7 +334,7 @@ class ArrangementTests(unittest.TestCase):
         payload = {"workDir": str(self.work), "action": "optimize-fragment", "position": 0,
                    "sourceVersion": self.state["sourceVersion"], "fragment": self.state["segments"][0],
                    "mode": "auto", "config": {}}
-        with patch("modules.arrangement.create_optimizer", return_value=client):
+        with patch("modules.arrangement.optimization.create_optimizer", return_value=client):
             result = run_editor_request(payload)
         self.assertEqual(result["edit"]["text"], "新的中文")
         self.assertEqual(load_state(self.work), self.state)
@@ -391,6 +393,38 @@ class ArrangementTests(unittest.TestCase):
         with self.assertRaises(ArrangementError):
             resolve_replacement(self.work, "debug/_parsed_vtt.json")
 
+    def test_merged_fragment_takes_fresh_audio_from_first_fragment_start(self):
+        directory = self.work / "arrangement/audio"
+        directory.mkdir(parents=True)
+        (directory / "fresh.wav").write_bytes(b"fresh audio")
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        save_text(cache / "tts_tempo_0007.json", '{"rate": 1.25}')
+        first, merged_away = self.state["segments"]
+        first.update(text="请听我说一句话，我们慢慢说话吧", interval={"start": 100, "end": 900}, ttsSample={"start": 0, "end": 800})
+        merged_away["deleted"] = True
+        saved = json.loads(json.dumps(self.state))
+        with patch("modules.arrangement.plan.synthesize_edit", new=AsyncMock(return_value={"path": "arrangement/audio/fresh.wav", "text": first["text"]})), \
+             patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 2600)):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+        [clip] = plan.clips
+        self.assertEqual((clip.path, clip.start_ms, clip.end_ms), (directory / "fresh.wav", 100, 2700))
+        self.assertEqual((clip.sample_start_ms, clip.sample_end_ms), (0, 2600))
+        self.assertEqual(self.state, saved)
+
+    def test_fresh_take_is_fitted_before_the_next_active_fragment(self):
+        directory = self.work / "arrangement/audio"
+        directory.mkdir(parents=True)
+        (directory / "fresh.wav").write_bytes(b"fresh audio")
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        (cache / "tts_0001.wav").touch()
+        self.state["segments"][0].update(text="请听我说一句很长很长的话", interval={"start": 0, "end": 500}, ttsSample={"start": 0, "end": 500})
+        with patch("modules.arrangement.plan.synthesize_edit", new=AsyncMock(return_value={"path": "arrangement/audio/fresh.wav", "text": "x"})), \
+             patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 2200)):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {"followOriginalRate": 1.15}, {})
+        self.assertEqual((plan.clips[0].start_ms, plan.clips[0].end_ms, plan.clips[0].sample_end_ms), (0, 2000, 2200))
+
     def test_preparation_reuses_user_audio_and_generates_only_changed_text(self):
         directory = self.work / "arrangement/audio"
         directory.mkdir(parents=True)
@@ -398,7 +432,7 @@ class ArrangementTests(unittest.TestCase):
         (directory / "deferred.wav").write_bytes(b"deferred audio")
         self.state["segments"][0]["replacement"] = {"path": "arrangement/audio/user.wav", "text": self.rows[0]["text"]}
         self.state["segments"][1]["text"] = "之后生成的草稿"
-        with patch("modules.arrangement.synthesize_edit", new=AsyncMock(return_value={"path": "arrangement/audio/deferred.wav", "text": "之后生成的草稿"})) as synth, patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 1000)):
+        with patch("modules.arrangement.plan.synthesize_edit", new=AsyncMock(return_value={"path": "arrangement/audio/deferred.wav", "text": "之后生成的草稿"})) as synth, patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 1000)):
             plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
         synth.assert_awaited_once()
         self.assertEqual([clip.index for clip in plan.clips], [7, 13])
@@ -411,7 +445,7 @@ class ArrangementTests(unittest.TestCase):
         adapter = MagicMock()
         adapter.render.return_value = result
         payload = {"workDir": str(self.work), "audioPath": "source.wav", "state": self.state, "config": {}, "ttsKwargs": {}}
-        with patch("modules.arrangement.prepare_arrangement_plan", return_value=plan), patch("modules.arrangement_audio.create_arrangement_audio_adapter", return_value=adapter), patch("modules.arrangement_audio.write_arrangement_result", return_value={"output_mp3": "result.mp3"}) as writer:
+        with patch("modules.arrangement.prepare_arrangement_plan", return_value=plan), patch("modules.arrangement.create_arrangement_audio_adapter", return_value=adapter), patch("modules.arrangement.write_arrangement_result", return_value={"output_mp3": "result.mp3"}) as writer:
             output = run_arrangement_pipeline(payload)
         adapter.render.assert_called_once_with(plan)
         self.assertIs(writer.call_args.args[0], result)

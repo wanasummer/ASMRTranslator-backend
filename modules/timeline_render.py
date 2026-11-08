@@ -10,8 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .arrangement import initial_state, prepare_arrangement_plan, voice_asset_path
-from .arrangement_contracts import ArrangementAudioAdapter, ArrangementPlan
+from .arrangement import ArrangementAudioAdapter, ArrangementPlan, initial_state, prepare_arrangement_plan, voice_asset_path
 from .audio_joiner import SegmentPlacement
 
 
@@ -55,7 +54,7 @@ def render_initial_timeline(segments: list[dict], output_dir: str, audio_path: s
                             config: TimelineRenderConfig,
                             adapter: ArrangementAudioAdapter | None = None) -> TimelineRender:
     """Render ``initial_state`` through the arrangement renderer into ``output.wav/mp3``."""
-    from .arrangement_audio import create_arrangement_audio_adapter
+    from .arrangement import create_arrangement_audio_adapter
     work = Path(output_dir)
     published = publish_voice_assets(segments, work)
     plan = prepare_arrangement_plan(work, Path(audio_path), initial_state(work),

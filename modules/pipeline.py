@@ -31,8 +31,8 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     """Rebuild the edited studio timeline from an immutable task snapshot."""
     from contextlib import redirect_stdout
     from uuid import uuid4
-    from .arrangement import prepare_arrangement_plan, publish_subtitle_base
-    from .arrangement_audio import create_arrangement_audio_adapter, write_arrangement_result
+    from .arrangement import (ArrangementError, adopt_rendered_takes, create_arrangement_audio_adapter,
+                              prepare_arrangement_plan, publish_subtitle_base, write_arrangement_result)
     work = Path(payload["workDir"])
     output = work / "arrangement/runs" / uuid4().hex
     log_path = address(output / "arrangement.log").reference
@@ -49,6 +49,12 @@ def run_arrangement_pipeline(payload: dict) -> dict:
             print_progress("concat", "重新拼接并导出", 0, 1)
             files = _required_stage("OUTPUT_WRITE_DENIED", write_arrangement_result, result, output, payload["state"])
             print(f"[arrangement] 重新编排完成：{files['output_mp3']}")
+            try:
+                adopted = adopt_rendered_takes(work, plan.takes)
+                print(f"[arrangement] 新生成 TTS {len(plan.takes)} 段，回写编排草稿 {adopted} 段")
+            except ArrangementError as error:
+                # The export is complete; without adoption the studio keeps the previous audio for these fragments.
+                print(f"[arrangement] 新生成的 TTS 未回写编排草稿：{error}")
             print_progress("concat", "编排完成", 1, 1)
     from .run_results import record_arrangement_run
     _required_stage("OUTPUT_WRITE_DENIED", record_arrangement_run, work, output, payload["state"], files)

@@ -9,8 +9,7 @@ from unittest.mock import Mock, patch
 
 from pydub import AudioSegment
 
-from modules.arrangement import cached_tts
-from modules.arrangement_contracts import ArrangementAudioResult
+from modules.arrangement import ArrangementAudioResult, cached_tts
 from modules.mode_builders import create_segment_builder
 from modules.storage import initialize_project, read_text, save_text
 from modules.timeline_render import TimelineRenderConfig, publish_voice_assets, render_initial_timeline

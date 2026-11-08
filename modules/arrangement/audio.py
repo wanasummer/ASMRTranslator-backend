@@ -6,9 +6,9 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .arrangement_contracts import ArrangementError, ArrangedClip, ArrangementPlan, ArrangementAudioResult, ArrangementAudioAdapter
-from .audio_joiner import get_ffmpeg_path
-from .storage import save_json, save_text
+from .contracts import ArrangementError, ArrangedClip, ArrangementPlan, ArrangementAudioResult, ArrangementAudioAdapter
+from ..audio_joiner import get_ffmpeg_path
+from ..storage import save_json, save_text
 
 
 def perceived_db(audio) -> float | None:
@@ -105,7 +105,7 @@ def create_arrangement_audio_adapter(name: str = "pydub") -> ArrangementAudioAda
 
 def write_arrangement_result(result: ArrangementAudioResult, directory: Path, snapshot: dict) -> dict:
     """Persist final artifacts separately from audio transformation and orchestration."""
-    from .storage import initialize_project
+    from ..storage import initialize_project
     initialize_project(directory)
     directory.mkdir(parents=True, exist_ok=True)
     wav, mp3 = directory / "output.wav", directory / "output.mp3"

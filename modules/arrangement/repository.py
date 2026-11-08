@@ -6,8 +6,8 @@ import time
 from typing import Protocol
 from uuid import uuid4
 
-from .arrangement_contracts import ArrangementState
-from .storage import address, encode_json
+from .contracts import ArrangementState
+from ..storage import address, encode_json
 
 
 class ArrangementRepository(Protocol):

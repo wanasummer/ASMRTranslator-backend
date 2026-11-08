@@ -132,7 +132,7 @@ class NativeAudioTests(unittest.TestCase):
             self.assertEqual(builder.wav_params, profile.wav_params)
 
     def test_timeline_recipe_rerenders_the_same_arrangement_plan_natively(self):
-        from modules.arrangement_contracts import ArrangedClip, ArrangementPlan
+        from modules.arrangement import ArrangedClip, ArrangementPlan
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, voice = root / "original.wav", root / "chunk_0/02_tts/voice_0000.wav"
@@ -151,7 +151,7 @@ class NativeAudioTests(unittest.TestCase):
                 commands.append(args)
                 target.write_bytes(b"encoded")
                 return b""
-            with (patch("modules.arrangement_audio.create_arrangement_audio_adapter", return_value=adapter),
+            with (patch("modules.arrangement.create_arrangement_audio_adapter", return_value=adapter),
                   patch("modules.high_quality_export.probe_audio",
                         return_value=AudioProfile(44100, 2, 16, "pcm_s16le", 0)),
                   patch("modules.high_quality_export._command", side_effect=command),

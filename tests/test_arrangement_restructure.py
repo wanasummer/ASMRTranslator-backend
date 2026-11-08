@@ -6,8 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from modules.arrangement import initial_state, load_state, publish_subtitle_base, run_editor_request, save_state
-from modules.arrangement_restructure import FragmentRow, apply_restructure_plan, restructure_rows
+from modules.arrangement.editor import run_editor_request
+from modules.arrangement.restructure import FragmentRow, apply_restructure_plan, restructure_rows
+from modules.arrangement.state import initial_state, load_state, publish_subtitle_base, save_state
 from modules.error import LlmError, descriptor
 from modules.llm import LLMConfig
 from modules.llm.capabilities.capRestructure.parsing import parse_restructure_plan
@@ -93,7 +94,7 @@ class ApplyRestructurePlanTests(unittest.TestCase):
         result, report, changes = apply_restructure_plan(self.state, plan)
         edits = {edit["index"]: edit for edit in result["segments"]}
         self.assertEqual([change["index"] for change in changes], [1, 2, 3, 4, 6])
-        self.assertEqual(changes[2], {"index": 3, "text": "合并", "japanese": "日3日4日6", "deleted": False})
+        self.assertEqual(changes[2], {"index": 3, "text": "合并", "japanese": "日3日4日6", "deleted": False, "blockId": None})
         self.assertEqual(edits[1]["text"], "改")
         self.assertTrue(edits[2]["deleted"])
         self.assertEqual((edits[3]["text"], edits[3]["japanese"]), ("合并", "日3日4日6"))
@@ -101,6 +102,27 @@ class ApplyRestructurePlanTests(unittest.TestCase):
         self.assertTrue(edits[4]["deleted"] and edits[6]["deleted"])
         self.assertEqual(report, {"modified": 1, "deleted": 1, "merged": 1, "mergedFragments": 3, "skipped": []})
         self.assertEqual(self.state["segments"][0]["text"], "中文1")
+
+    def test_merge_across_blocks_moves_every_fragment_of_the_later_block_into_the_first(self):
+        blocks = {1: "a", 2: "a", 3: "b", 4: "b", 5: "c", 6: "c"}
+        plan = RestructurePlan((RestructureOperation("merge", (2, 3), "跨块合并"),))
+        result, _, changes = apply_restructure_plan(self.state, plan, blocks=blocks)
+        self.assertEqual({edit["index"]: edit.get("blockId") for edit in result["segments"]},
+                         {1: None, 2: None, 3: "a", 4: "a", 5: None, 6: None})
+        self.assertEqual([(change["index"], change["blockId"]) for change in changes], [(2, None), (3, "a"), (4, "a")])
+
+    def test_merge_inside_one_block_keeps_blocks(self):
+        plan = RestructurePlan((RestructureOperation("merge", (3, 4), "同块合并"),))
+        result, _, changes = apply_restructure_plan(self.state, plan, blocks={1: "a", 2: "a", 3: "b", 4: "b", 5: "c", 6: "c"})
+        self.assertFalse(any("blockId" in edit for edit in result["segments"]))
+        self.assertEqual([change["index"] for change in changes], [3, 4])
+
+    def test_merge_over_a_deleted_block_joins_everything_it_spans(self):
+        blocks = {1: "a", 2: "a", 3: "b", 4: "b", 5: "c", 6: "d"}
+        plan = RestructurePlan((RestructureOperation("merge", (4, 6), "跨过已删除"),))
+        result, _, _ = apply_restructure_plan(self.state, plan, blocks=blocks)
+        self.assertEqual({edit["index"]: edit.get("blockId") for edit in result["segments"]},
+                         {1: None, 2: None, 3: None, 4: None, 5: "b", 6: "b"})
 
     def test_fragments_changed_since_planning_are_skipped_whole(self):
         latest = json.loads(json.dumps(self.state))
@@ -140,7 +162,7 @@ class RestructureEditorRequestTests(unittest.TestCase):
         self.state["segments"][2]["deleted"] = True
         client = MagicMock()
         client.summarize = AsyncMock(return_value="情节")
-        with patch("modules.arrangement.create_optimizer", return_value=client):
+        with patch("modules.arrangement.optimization.create_optimizer", return_value=client):
             self.assertEqual(run_editor_request(self._request("summarize-arrangement"))["summary"], "情节")
             self.assertEqual([row.index for row in client.summarize.call_args.args[0]], [0, 1])
             client.summarize = AsyncMock(side_effect=LlmError(descriptor("LLM_SUMMARY_FAILED")))
@@ -152,15 +174,16 @@ class RestructureEditorRequestTests(unittest.TestCase):
         client = MagicMock()
         client.restructure = AsyncMock(return_value=RestructurePlan((RestructureOperation("merge", (0, 1), "合并句"),)))
         payload = self._request("optimize-arrangement", instruction="合并切分错误", summary="情节", indices=[0, 1])
-        with patch("modules.arrangement.create_optimizer", return_value=client):
+        with patch("modules.arrangement.optimization.create_optimizer", return_value=client):
             result = run_editor_request(payload)
         rows, summary, instruction = client.restructure.call_args.args
         self.assertEqual(([row.index for row in rows], summary, instruction), ([0, 1], "情节", "合并切分错误"))
-        self.assertEqual(result["changes"], [{"index": 0, "text": "合并句", "japanese": "日0日1", "deleted": False},
-                                             {"index": 1, "text": "中文1", "japanese": "日1", "deleted": True}])
+        self.assertEqual(result["changes"], [{"index": 0, "text": "合并句", "japanese": "日0日1", "deleted": False, "blockId": None},
+                                             {"index": 1, "text": "中文1", "japanese": "日1", "deleted": True, "blockId": "row-0"}])
         saved = load_state(self.work)
         self.assertEqual((saved["segments"][0]["text"], saved["segments"][1]["deleted"], saved["segments"][2]["text"]),
                          ("合并句", True, "中文2"))
+        self.assertEqual([edit.get("blockId") for edit in saved["segments"]], [None, "row-0", None])
         audit = address(self.work / "arrangement/audit").store.keys("", "arrangement/audit/")
         self.assertEqual(len(audit), 2)
 
@@ -181,14 +204,14 @@ class RestructureEditorRequestTests(unittest.TestCase):
     def test_batch_with_deleted_fragment_is_rejected(self):
         self.state["segments"][1]["deleted"] = True
         payload = self._request("optimize-arrangement", instruction="要求", summary="", indices=[0, 1])
-        with patch("modules.arrangement.create_optimizer") as factory, self.assertRaises(Exception):
+        with patch("modules.arrangement.optimization.create_optimizer") as factory, self.assertRaises(Exception):
             run_editor_request(payload)
         factory.assert_not_called()
 
     def test_empty_instruction_is_rejected_before_any_request(self):
         client = MagicMock()
         payload = self._request("optimize-arrangement", instruction="  ", summary="", indices=[0])
-        with patch("modules.arrangement.create_optimizer", return_value=client), self.assertRaises(Exception):
+        with patch("modules.arrangement.optimization.create_optimizer", return_value=client), self.assertRaises(Exception):
             run_editor_request(payload)
         client.restructure.assert_not_called()
 

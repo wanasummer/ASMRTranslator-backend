@@ -59,6 +59,10 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
 - Keep subtitle and text cleaning policies in `modules/cleaning/`, with one
   independently toggleable capability per `capabilities/capXxx/` directory
   (`capJapaneseClean`, `capInterjectionSkip`) backed by its own `Config`.
+- Keep studio arrangement (draft state, subtitle optimization, TTS regeneration,
+  audio plan and renderer) in `modules/arrangement/`. Code outside the package
+  imports only from `modules.arrangement`; `editor.py` only dispatches sidecar
+  actions to the owning submodule.
 
 - Keep public contracts typed and explicit. Use dataclasses, TypedDicts, Protocols,
   or abstract base classes where they make boundaries clearer.

@@ -201,8 +201,7 @@ def _append_pcm(output, data: np.ndarray, crossfade: int, overlap: int, channels
 
 def _render_arrangement_input(recipe: dict, work: Path, folder: Path) -> list[str]:
     """Render a contract-2 timeline with the same adapter the studio export uses."""
-    from .arrangement_audio import create_arrangement_audio_adapter
-    from .arrangement_contracts import ArrangedClip, ArrangementPlan
+    from .arrangement import ArrangedClip, ArrangementPlan, create_arrangement_audio_adapter
     clips = []
     for clip in recipe["clips"]:
         if clip["path"] not in recipe["inputs"]:

@@ -37,6 +37,8 @@ class ArrangementEdit(TypedDict):
     originalInterval: Interval | None
     ttsSample: Interval | None
     inserted: NotRequired[InsertedFragment | None]
+    # Block override written when a merge joins fragments from different blocks; absent keeps the baseline block.
+    blockId: NotRequired[str | None]
 
 
 class ArrangementState(TypedDict):
@@ -62,10 +64,22 @@ class ArrangedClip:
 
 
 @dataclass(frozen=True)
+class RenderedTake:
+    """A clip synthesized during rendering because the draft text had no matching audio yet."""
+    index: int
+    text: str
+    path: str
+    start_ms: int
+    end_ms: int
+    sample_end_ms: int
+
+
+@dataclass(frozen=True)
 class ArrangementPlan:
     source_audio: Path
     clips: tuple[ArrangedClip, ...]
     global_loudness: bool
+    takes: tuple[RenderedTake, ...] = ()
 
 
 @dataclass(frozen=True)
