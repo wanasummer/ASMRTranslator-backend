@@ -38,5 +38,5 @@ def run_editor_request(payload: dict) -> dict:
                                         payload.get("position") if action == "optimize" else None)}
     if action == "regenerate":
         return {"state": regenerate_fragment(work, state, payload["position"],
-                                             payload["config"], payload["ttsKwargs"])}
+                                             payload["config"], payload["ttsKwargs"], payload.get("ttsOverrides"))}
     raise ArrangementError("未知编排操作")

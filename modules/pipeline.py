@@ -43,7 +43,7 @@ def run_arrangement_pipeline(payload: dict) -> dict:
             print_progress("prepare", "读取编排配置与缓存", 0, 1)
             plan = _required_stage("AUDIO_DSP_FAILED", prepare_arrangement_plan,
                                    work, Path(payload["audioPath"]), payload["state"],
-                                   payload["config"], payload["ttsKwargs"])
+                                   payload["config"], payload["ttsKwargs"], payload.get("ttsOverrides"))
             print_progress("building", "处理编排片段", 0, 1)
             result = _required_stage("AUDIO_DSP_FAILED", create_arrangement_audio_adapter().render, plan)
             print_progress("concat", "重新拼接并导出", 0, 1)

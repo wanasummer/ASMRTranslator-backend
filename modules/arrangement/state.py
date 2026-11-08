@@ -58,6 +58,21 @@ def aligned_rows(rows: list[dict], edits: list[dict]) -> list[tuple[int | None, 
     return result
 
 
+def fragment_tts(edit: dict) -> dict | None:
+    """The fragment's own TTS profile, or None when it follows the generation profile."""
+    return edit.get("tts") or None
+
+
+def replacement_matches(edit: dict) -> bool:
+    """Whether the stored replacement was synthesized from the fragment's current text and TTS profile."""
+    replacement = edit.get("replacement")
+    return bool(replacement) and replacement["text"] == edit["text"] and fragment_tts(replacement) == fragment_tts(edit)
+
+
+def _valid_tts_profile(value) -> bool:
+    return value is None or (isinstance(value, dict) and isinstance(value.get("ttsBackend"), str) and bool(value["ttsBackend"]))
+
+
 def block_id(edit: dict, row: dict) -> str:
     """Effective block of a draft fragment; ``row`` is its ``aligned_rows`` row."""
     return edit.get("blockId") or row.get("source_block_id") or f"row-{row['index']}"
@@ -99,6 +114,8 @@ def validate_state(work: Path, state: ArrangementState) -> ArrangementState:
             raise ArrangementError("片段删除状态无效")
         if edit.get("blockId") is not None and (not isinstance(edit["blockId"], str) or not edit["blockId"]):
             raise ArrangementError("片段分组标识无效")
+        if not _valid_tts_profile(edit.get("tts")):
+            raise ArrangementError("片段单独配音配置无效")
         original_interval = edit.get("originalInterval")
         if original_interval is not None:
             start, end = original_interval.get("start"), original_interval.get("end")
@@ -125,7 +142,7 @@ def validate_state(work: Path, state: ArrangementState) -> ArrangementState:
         replacement = edit.get("replacement")
         if replacement:
             resolve_replacement(work, replacement["path"])
-            if not isinstance(replacement.get("text"), str):
+            if not isinstance(replacement.get("text"), str) or not _valid_tts_profile(replacement.get("tts")):
                 raise ArrangementError("重新生成记录格式无效")
     return state
 

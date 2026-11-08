@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from modules.arrangement.assets import pipeline_tts_rates, resolve_replacement, tts_max_rate
 from modules.arrangement.audio import ArrangementPlan, ArrangementAudioResult, PydubArrangementAdapter, perceived_db, write_arrangement_result
-from modules.arrangement.contracts import ArrangedClip, ArrangementError
+from modules.arrangement.contracts import ArrangedClip, ArrangementError, TtsVoice
 from modules.arrangement.editor import run_editor_request
 from modules.arrangement.optimization import optimize_fragment, optimize_subtitles
 from modules.arrangement.plan import fit_default_placement, prepare_arrangement_plan
@@ -234,6 +234,155 @@ class ArrangementTests(unittest.TestCase):
         self.assertEqual(synth.call_args.args[1]["index"], 14)
         self.assertEqual(result["state"]["segments"][1]["replacement"]["path"], "arrangement/audio/new.wav")
 
+    def test_fragment_tts_profile_is_validated_and_persisted(self):
+        self.state["segments"][0]["tts"] = {"ttsBackend": "edge-tts", "edgeVoice": "zh-CN-XiaoyiNeural"}
+        save_state(self.work, self.state)
+        self.assertEqual(load_state(self.work)["segments"][0]["tts"]["edgeVoice"], "zh-CN-XiaoyiNeural")
+        for invalid in ({"edgeVoice": "x"}, "edge-tts", {"ttsBackend": ""}):
+            bad = json.loads(json.dumps(self.state))
+            bad["segments"][0]["tts"] = invalid
+            with self.assertRaises(ArrangementError):
+                save_state(self.work, bad)
+
+    def _cache_both(self):
+        cache = self.work / "chunk_0/02_tts"
+        cache.mkdir(parents=True)
+        (cache / "tts_0000.wav").touch()
+        (cache / "tts_0001.wav").touch()
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "fresh.wav").touch()
+
+    def test_render_uses_generation_profile_for_fragments_without_their_own(self):
+        self._cache_both()
+        self.state["segments"][1]["text"] = "改过的台词"
+        generation = {"ttsBackend": "fish-audio", "rate": "+5%", "edgePitch": "+0Hz"}
+        synth = AsyncMock(return_value={"path": "arrangement/audio/fresh.wav", "text": "改过的台词"})
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 800)), \
+             patch("modules.arrangement.plan.synthesize_edit", synth):
+            prepare_arrangement_plan(self.work, Path("original.wav"), self.state, generation, {"reference_id": "first"})
+        self.assertEqual(synth.call_args.args[2], TtsVoice("fish-audio", "+5%", "+0Hz", {"reference_id": "first"}))
+
+    def test_fragment_profile_triggers_synthesis_with_its_resolved_voice(self):
+        self._cache_both()
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "zh-CN-YunxiNeural"}
+        self.state["segments"][0]["tts"] = profile
+        overrides = {"7": {"ttsBackend": "edge-tts", "rate": "-10%", "edgePitch": "+10Hz", "kwargs": {"default_voice": "zh-CN-YunxiNeural"}}}
+        synth = AsyncMock(return_value={"path": "arrangement/audio/fresh.wav", "text": self.rows[0]["text"], "tts": profile})
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 800)), \
+             patch("modules.arrangement.plan.synthesize_edit", synth):
+            plan = prepare_arrangement_plan(self.work, Path("original.wav"), self.state,
+                                            {"ttsBackend": "fish-audio"}, {}, overrides)
+        synth.assert_awaited_once()
+        self.assertEqual(synth.call_args.args[2], TtsVoice("edge-tts", "-10%", "+10Hz", {"default_voice": "zh-CN-YunxiNeural"}))
+        self.assertEqual([(take.index, take.tts) for take in plan.takes], [(7, profile)])
+
+    def test_replacement_is_reused_only_for_the_same_fragment_profile(self):
+        self._cache_both()
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "a"}
+        self.state["segments"][0].update(tts=profile, replacement={"path": "arrangement/audio/fresh.wav", "text": self.rows[0]["text"], "tts": profile})
+        synth = AsyncMock(return_value={"path": "arrangement/audio/fresh.wav", "text": self.rows[0]["text"]})
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 800)), \
+             patch("modules.arrangement.plan.synthesize_edit", synth):
+            prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {}, {"7": {"ttsBackend": "edge-tts"}})
+            synth.assert_not_awaited()
+            self.state["segments"][0]["tts"] = {"ttsBackend": "edge-tts", "edgeVoice": "b"}
+            prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {}, {"7": {"ttsBackend": "edge-tts"}})
+            synth.assert_awaited_once()
+
+    def test_fragment_profile_without_resolved_settings_fails_explicitly(self):
+        self._cache_both()
+        self.state["segments"][0]["tts"] = {"ttsBackend": "edge-tts"}
+        with patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 800)), \
+             patch("modules.arrangement.plan.synthesize_edit", AsyncMock()), self.assertRaises(ArrangementError):
+            prepare_arrangement_plan(self.work, Path("original.wav"), self.state, {}, {})
+
+    def test_regenerate_uses_fragment_override_and_records_profile(self):
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "b"}
+        self.state["segments"][0]["tts"] = profile
+        save_state(self.work, self.state)
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+        synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": self.rows[0]["text"], "tts": profile})
+        with patch("modules.arrangement.synthesis.synthesize_edit", synth):
+            result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 0,
+                                         "state": self.state, "config": {"ttsBackend": "fish-audio"}, "ttsKwargs": {},
+                                         "ttsOverrides": {"7": {"ttsBackend": "edge-tts", "kwargs": {"default_voice": "b"}}}})
+        self.assertEqual(synth.call_args.args[2].kwargs, {"default_voice": "b"})
+        self.assertEqual(result["state"]["segments"][0]["replacement"]["tts"], profile)
+
+    def test_regenerate_without_fragment_profile_uses_generation_config(self):
+        self.state["segments"][0]["text"] = "改过的台词"
+        save_state(self.work, self.state)
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+        synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": "改过的台词"})
+        generation = {"ttsBackend": "fish-audio", "rate": "+5%", "edgePitch": "+0Hz"}
+        with patch("modules.arrangement.synthesis.synthesize_edit", synth):
+            result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 0,
+                                         "state": self.state, "config": generation, "ttsKwargs": {"reference_id": "first"}})
+        self.assertEqual(synth.call_args.args[2], TtsVoice("fish-audio", "+5%", "+0Hz", {"reference_id": "first"}))
+        self.assertNotIn("tts", result["state"]["segments"][0]["replacement"])
+
+    def test_regenerate_saves_tts_profile_only_after_the_audio_is_attached(self):
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "new"}
+        save_state(self.work, self.state)
+        submitted = json.loads(json.dumps(self.state))
+        submitted["segments"][0]["tts"] = profile
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+        synth = AsyncMock(return_value={"path": "arrangement/audio/new.wav", "text": self.rows[0]["text"], "tts": profile})
+        with patch("modules.arrangement.synthesis.synthesize_edit", synth):
+            result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 0,
+                                         "state": submitted, "config": {"ttsBackend": "fish-audio"}, "ttsKwargs": {},
+                                         "ttsOverrides": {"7": {"ttsBackend": "edge-tts", "kwargs": {"default_voice": "new"}}}})
+        saved = result["state"]["segments"][0]
+        self.assertEqual(saved["tts"], profile)
+        self.assertEqual(saved["replacement"]["tts"], profile)
+
+    def test_regenerate_keeps_saved_tts_when_text_changes_during_synthesis(self):
+        previous = {"ttsBackend": "edge-tts", "edgeVoice": "old"}
+        self.state["segments"][0]["tts"] = previous
+        save_state(self.work, self.state)
+        submitted = json.loads(json.dumps(self.state))
+        submitted["segments"][0]["tts"] = {"ttsBackend": "edge-tts", "edgeVoice": "new"}
+        audio = self.work / "arrangement/audio"
+        audio.mkdir(parents=True)
+        (audio / "new.wav").touch()
+
+        def change_text(_work, _row, _voice):
+            latest = load_state(self.work)
+            latest["segments"][0]["text"] = "生成期间改了文本"
+            save_state(self.work, latest)
+            return {"path": "arrangement/audio/new.wav", "text": self.rows[0]["text"], "tts": submitted["segments"][0]["tts"]}
+
+        with patch("modules.arrangement.synthesis.synthesize_edit", side_effect=change_text):
+            result = run_editor_request({"workDir": str(self.work), "action": "regenerate", "position": 0,
+                                         "state": submitted, "config": {"ttsBackend": "fish-audio"}, "ttsKwargs": {},
+                                         "ttsOverrides": {"7": {"ttsBackend": "edge-tts", "kwargs": {}}}})
+        segment = result["state"]["segments"][0]
+        self.assertEqual(segment["text"], "生成期间改了文本")
+        self.assertEqual(segment["tts"], previous)
+        self.assertIsNone(segment["replacement"])
+
+    def test_synthesized_replacement_records_only_fragment_profiles(self):
+        adapter = MagicMock()
+        adapter.output_extension = ".wav"
+        async def synth(text, voice, path, **kwargs):
+            Path(path).write_bytes(b"new audio")
+        adapter.synthesize = AsyncMock(side_effect=synth)
+        adapter.aclose = AsyncMock()
+        voice = TtsVoice("edge-tts", "+0%", "+0Hz", {"api_key": "secret"})
+        plain = asyncio.run(synthesize_edit(self.work, self.state["segments"][0], voice, adapter))
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "a"}
+        tuned = asyncio.run(synthesize_edit(self.work, {**self.state["segments"][0], "tts": profile}, voice, adapter))
+        self.assertNotIn("tts", plain)
+        self.assertEqual(tuned["tts"], profile)
+        self.assertNotIn("secret", json.dumps(tuned))
+
     def test_stale_source_and_invalid_intervals_are_rejected(self):
         bad = json.loads(json.dumps(self.state))
         bad["segments"][0]["interval"] = {"start": 0, "end": 2200}
@@ -385,8 +534,9 @@ class ArrangementTests(unittest.TestCase):
             Path(path).write_bytes(b"new audio")
         adapter.synthesize = AsyncMock(side_effect=synth)
         adapter.aclose = AsyncMock()
-        first = asyncio.run(synthesize_edit(self.work, self.state["segments"][0], {}, {}, adapter))
-        second = asyncio.run(synthesize_edit(self.work, self.state["segments"][0], {}, {}, adapter))
+        voice = TtsVoice("edge-tts", "+0%", "+0Hz", {})
+        first = asyncio.run(synthesize_edit(self.work, self.state["segments"][0], voice, adapter))
+        second = asyncio.run(synthesize_edit(self.work, self.state["segments"][0], voice, adapter))
         self.assertNotEqual(first["path"], second["path"])
         self.assertEqual(first["text"], self.rows[0]["text"])
         self.assertTrue(resolve_replacement(self.work, first["path"]).is_file())

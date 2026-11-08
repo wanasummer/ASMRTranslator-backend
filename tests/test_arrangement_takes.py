@@ -53,6 +53,16 @@ class RenderedTakeTests(unittest.TestCase):
         self.assertEqual(adopt_rendered_takes(self.work, [self.take]), 0)
         self.assertIsNone(load_state(self.work)["segments"][0]["replacement"])
 
+    def test_take_keeps_its_fragment_profile_and_skips_a_changed_profile(self):
+        profile = {"ttsBackend": "edge-tts", "edgeVoice": "a"}
+        latest = load_state(self.work)
+        latest["segments"][0]["tts"] = profile
+        save_state(self.work, latest)
+        self.assertEqual(adopt_rendered_takes(self.work, [self.take]), 0)
+        tuned = RenderedTake(*[getattr(self.take, field) for field in ("index", "text", "path", "start_ms", "end_ms", "sample_end_ms")], profile)
+        self.assertEqual(adopt_rendered_takes(self.work, [tuned]), 1)
+        self.assertEqual(load_state(self.work)["segments"][0]["replacement"]["tts"], profile)
+
     def test_stale_studio_save_keeps_the_adopted_take_until_the_draft_is_loaded(self):
         adopt_rendered_takes(self.work, [self.take])
         stale = json.loads(json.dumps(self.state))

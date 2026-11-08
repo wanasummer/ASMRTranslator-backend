@@ -16,6 +16,8 @@ class Interval(TypedDict):
 class Replacement(TypedDict):
     path: str
     text: str
+    # The fragment TTS profile the audio was synthesized with; absent means the generation profile.
+    tts: NotRequired[dict | None]
 
 
 class InsertedFragment(TypedDict):
@@ -39,6 +41,8 @@ class ArrangementEdit(TypedDict):
     inserted: NotRequired[InsertedFragment | None]
     # Block override written when a merge joins fragments from different blocks; absent keeps the baseline block.
     blockId: NotRequired[str | None]
+    # Public per-fragment TTS profile (no credentials); absent synthesizes with the generation profile.
+    tts: NotRequired[dict | None]
 
 
 class ArrangementState(TypedDict):
@@ -72,6 +76,16 @@ class RenderedTake:
     start_ms: int
     end_ms: int
     sample_end_ms: int
+    tts: dict | None = None
+
+
+@dataclass(frozen=True)
+class TtsVoice:
+    """Resolved synthesis settings for one fragment; ``kwargs`` may carry credentials and is never persisted."""
+    backend: str
+    rate: str
+    pitch: str
+    kwargs: dict
 
 
 @dataclass(frozen=True)

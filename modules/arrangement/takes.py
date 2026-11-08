@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .contracts import ArrangementState, RenderedTake
-from .state import draft_lock, load_state, save_state
+from .state import draft_lock, fragment_tts, load_state, replacement_matches, save_state
 from ..storage import contains, delete_document, read_json, save_json
 
 ADOPTED_TAKES = "arrangement/adopted_takes.json"
@@ -28,15 +28,17 @@ def adopt_rendered_takes(work: Path, takes: Sequence[RenderedTake]) -> int:
         by_index = {edit["index"]: edit for edit in latest["segments"]}
         for take in takes:
             edit = by_index.get(take.index)
-            replacement = edit and edit.get("replacement")
             if (edit is None or edit.get("deleted", False) or edit["text"] != take.text
-                    or (replacement and replacement["text"] == edit["text"])):
+                    or fragment_tts(edit) != take.tts or replacement_matches(edit)):
                 continue
             before = {field: edit.get(field) for field in _AUDIO_FIELDS}
-            edit.update(replacement={"path": take.path, "text": take.text},
+            replacement = {"path": take.path, "text": take.text}
+            if take.tts is not None:
+                replacement["tts"] = take.tts
+            edit.update(replacement=replacement,
                         interval={"start": take.start_ms, "end": take.end_ms},
                         ttsSample={"start": 0, "end": take.sample_end_ms})
-            ledger[str(take.index)] = {"text": take.text, "before": before,
+            ledger[str(take.index)] = {"text": take.text, "tts": take.tts, "before": before,
                                        "after": {field: edit[field] for field in _AUDIO_FIELDS}}
         if ledger:
             save_state(work, latest, repository)
@@ -59,6 +61,7 @@ def keep_adopted_takes(work: Path, state: ArrangementState) -> ArrangementState:
     for edit in result["segments"]:
         entry = ledger.get(str(edit["index"]))
         if (entry and not edit.get("deleted", False) and edit["text"] == entry["text"]
+                and fragment_tts(edit) == entry.get("tts")
                 and {field: edit.get(field) for field in _AUDIO_FIELDS} == entry["before"]):
             edit.update(entry["after"])
     return result

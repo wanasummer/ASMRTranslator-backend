@@ -8,8 +8,8 @@ from pathlib import Path
 
 from .assets import cached_tts, pipeline_tts_rates, resolve_replacement, tts_max_rate, tts_volume
 from .contracts import ArrangementError, ArrangementState, ArrangementPlan, ArrangedClip, RenderedTake
-from .state import aligned_rows, read_baseline, validate_state
-from .synthesis import synthesize_edit
+from .state import aligned_rows, fragment_tts, read_baseline, replacement_matches, validate_state
+from .synthesis import resolve_voice, synthesize_edit
 from ..speech_pace import landing_hint_ms
 
 
@@ -34,8 +34,13 @@ def fit_default_placement(start: int, sample_length: int, upper: float | None,
     return start + room, min(sample_length, round(room * rate))
 
 
-def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementState, config: dict, kwargs: dict) -> ArrangementPlan:
-    """Resolve cached and regenerated assets into an explicit, immutable audio plan."""
+def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementState, config: dict, kwargs: dict,
+                             overrides: dict | None = None) -> ArrangementPlan:
+    """Resolve cached and regenerated assets into an explicit, immutable audio plan.
+
+    ``config``/``kwargs`` describe the generation profile used for fragments without their own TTS profile;
+    ``overrides`` holds the resolved settings of fragments that have one (see ``resolve_voice``).
+    """
     from pydub import AudioSegment
     validate_state(work, state)
     rows, _ = read_baseline(work)
@@ -54,13 +59,14 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
         sample = edit.get("ttsSample")
         interval = edit.get("interval")
         fresh_take = False
-        if replacement and replacement["text"] == edit["text"]:
+        if replacement_matches(edit):
             path = resolve_replacement(work, replacement["path"])
             replaced += 1
         elif source_position is None and not edit["text"].strip():
             continue
-        elif edit["text"] != baseline["text"]:
-            replacement = asyncio.run(synthesize_edit(work, {**baseline, **edit}, config, kwargs))
+        elif edit["text"] != baseline["text"] or fragment_tts(edit) is not None:
+            voice = resolve_voice(edit, config, kwargs, overrides)
+            replacement = asyncio.run(synthesize_edit(work, {**baseline, **edit}, voice))
             path = resolve_replacement(work, replacement["path"])
             fresh_take = True
             replaced += 1
@@ -110,7 +116,8 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
                                   round(reference.get("start", reference.get("start_ms"))),
                                   round(reference.get("end", reference.get("end_ms"))), sample_start, sample_end))
         if fresh_take:
-            takes.append(RenderedTake(edit["index"], edit["text"], replacement["path"], start, end, sample_end))
+            takes.append(RenderedTake(edit["index"], edit["text"], replacement["path"], start, end, sample_end,
+                                      fragment_tts(edit)))
     deleted = sum(bool(edit.get("deleted", False)) for edit in state["segments"])
     inserted = len(state["segments"]) - len(rows)
     print(f"[arrangement] 共 {len(rows)} 段，新增 {inserted} 段，删除 {deleted} 段，复用 TTS 缓存 {reused} 段，替换 {replaced} 段")
