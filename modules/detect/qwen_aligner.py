@@ -46,7 +46,11 @@ def _expand_short_span(
 
 
 class QwenForceAlignSentenceAligner:
-    """Standalone Qwen forced-alignment sentence splitter."""
+    """Split internally with Qwen words, retaining the parent speech edges.
+
+    Word alignment is not evidence that speech outside the first/last word is
+    silent. The input slice owns those outer bounds, including trailing speech.
+    """
 
     def __init__(self, config: QwenConfig | DetectConfig, audio_path, *, client=None,
                  partitioner: QwenWordPartitioner | None = None):
@@ -134,7 +138,19 @@ class QwenForceAlignSentenceAligner:
                 char_start = char_end
 
             groups: list[AlignedSentenceBlock] = []
+            edge_adjustments = []
             for idx, (start, end, text_slice, meta) in enumerate(raw_spans):
+                aligned_start, aligned_end = start, end
+                if idx == 0:
+                    start = parent.speech_start_ms
+                if idx == len(raw_spans) - 1:
+                    end = parent.speech_end_ms
+                if (start, end) != (aligned_start, aligned_end):
+                    edge_adjustments.append({
+                        "index": idx, "aligned_start_ms": aligned_start,
+                        "aligned_end_ms": aligned_end, "start_ms": start,
+                        "end_ms": end,
+                    })
                 lower_bound = (
                     parent.speech_start_ms if idx == 0 else groups[-1].end_ms
                 )
@@ -169,6 +185,9 @@ class QwenForceAlignSentenceAligner:
                 )
             if not groups:
                 raise ValueError("Forced sentence partition produced no groups")
+            if edge_adjustments:
+                attempts.append({"method": "preserve-parent-speech-edges",
+                                 "adjustments": edge_adjustments})
         except Exception as error:
             code = getattr(error, "code", type(error).__name__)
             attempts.append({"error": code, "method": "qwen-force-align"})

@@ -100,7 +100,7 @@ class QwenPipelineIsolationTests(unittest.TestCase):
         translated = _build_sentence_blocks(result.blocks, {0: ["今天休息。"], 1: ["明天工作。"]},
                                             preserve_source_timeline=True)
         serialized = [_serialize_parsed_vtt_block(block) for block in translated]
-        self.assertEqual([(b["start_ms"], b["end_ms"]) for b in serialized], [(1100, 2400), (2700, 4600)])
+        self.assertEqual([(b["start_ms"], b["end_ms"]) for b in serialized], [(1000, 2400), (2700, 5000)])
         self.assertEqual([b["source_block_id"] for b in serialized], ["parent", "parent"])
         self.assertTrue(all(b.speaker == "speaker-1" for b in translated))
         self.assertEqual((original.index, original.start_ms, original.end_ms), (7, 1000, 5000))
@@ -112,6 +112,90 @@ class QwenPipelineIsolationTests(unittest.TestCase):
         ends, _ = QwenSentencePartitioner(QwenConfig()).partition(words, "はい。")
         self.assertEqual(ends, [0])
         self.assertEqual(words, snapshot)
+
+    def test_paused_fragmented_passive_stays_attached_to_its_noun(self):
+        text = "サンドイッチ...されちゃいましたね."
+        words = [
+            {"text": word, "start_ms": start, "end_ms": end}
+            for word, start, end in (
+                ("サンドイッチ", 0, 800), ("さ", 2640, 2880),
+                ("れ", 2880, 2960), ("ちゃい", 3040, 3280),
+                ("まし", 3280, 3600), ("た", 3600, 3680), ("ね", 3840, 4000),
+            )
+        ]
+        snapshot = [dict(row) for row in words]
+        for maximum in (12000, 2000):
+            with self.subTest(maximum=maximum):
+                ends, meta = QwenSentencePartitioner(QwenConfig(
+                    max_sentence_duration_ms=maximum)).partition(words, text)
+                self.assertEqual(ends, [len(words) - 1])
+                self.assertTrue(meta[0]["protected_continuation"])
+        self.assertEqual(words, snapshot)
+
+    def test_particle_continuation_survives_pause_but_terminal_punctuation_cuts(self):
+        words = [{"text": "お布団", "start_ms": 0, "end_ms": 600},
+                 {"text": "の", "start_ms": 3320, "end_ms": 3560},
+                 {"text": "中です", "start_ms": 3560, "end_ms": 4500}]
+        partitioner = QwenSentencePartitioner(QwenConfig())
+        self.assertEqual(partitioner.partition(words, "お布団...の中です。")[0], [2])
+        self.assertEqual(partitioner.partition(words, "お布団。の中です。")[0], [0, 2])
+
+    def test_paused_complete_sentences_still_split(self):
+        words = [{"text": "こんばんは", "start_ms": 0, "end_ms": 700},
+                 {"text": "今日はお休みです", "start_ms": 2540, "end_ms": 4200}]
+        self.assertEqual(QwenSentencePartitioner(QwenConfig()).partition(
+            words, "こんばんは...今日はお休みです。")[0], [0, 1])
+
+    def test_duration_limit_can_still_use_unprotected_acoustic_boundaries(self):
+        words = [{"text": word, "start_ms": start, "end_ms": start + 1200}
+                 for word, start in (("朝ご飯", 0), ("昼ご飯", 1360), ("晩ご飯", 2720))]
+        ends, _ = QwenSentencePartitioner(QwenConfig(
+            max_sentence_duration_ms=2000)).partition(words, "朝ご飯昼ご飯晩ご飯")
+        self.assertEqual(ends, [0, 1, 2])
+
+    def test_real_paused_sentence_keeps_its_tail_through_downstream_handoff(self):
+        # Saved Qwen word timings from the reported recording's first ASR slice.
+        timings = (
+            ("ほら", 960, 1000), ("お", 1328, 1696), ("目覚め", 2064, 2432),
+            ("た", 2800, 2840), ("こんばんは", 5440, 6160), ("お", 8080, 8120),
+            ("布団", 8320, 8480), ("の", 11200, 11440), ("中", 11520, 11521),
+            ("で", 11521, 11522), ("裸", 11522, 11523), ("の", 11523, 11524),
+            ("お", 11524, 11525), ("姉", 11525, 11760), ("さん", 11760, 12000),
+            ("たち", 12320, 12480), ("に", 12480, 12640),
+            ("サンドイッチ", 12640, 13440), ("さ", 15280, 15520),
+            ("れ", 15520, 15600), ("ちゃい", 15680, 15920),
+            ("まし", 15920, 16240), ("た", 16240, 16320), ("ね", 16480, 16640),
+        )
+        words = [{"text": word, "start_ms": start, "end_ms": end}
+                 for word, start, end in timings]
+        text = "ほら、お目覚めた...こんばんは.お布団の中で、裸のお姉さんたちにサンドイッチ...されちゃいましたね."
+        parent = AsrSlice("slice-11020-28400", 10620, 28800, 11020, 28400, ("region",))
+        source = VTTBlock(index=0, start_ms=11020, end_ms=28400,
+                          text=text, source_text=text, asr_slice=parent, speaker="speaker-1")
+        stage = create_detect_stage(DetectConfig(aligner="qwen-force-align"), "source.wav")
+        stage.aligner.client = SimpleNamespace(request=lambda *a, **k: ({"words": words}, 17380))
+        with tempfile.TemporaryDirectory() as directory:
+            result = stage.run(DetectStageInput((source,)), directory)
+            audit = read_json(Path(directory) / "detect_output/sentence_alignment.json")
+        self.assertEqual([b.text for b in result.blocks], [
+            "ほら、お目覚めた...", "こんばんは.",
+            "お布団の中で、裸のお姉さんたちにサンドイッチ...されちゃいましたね.",
+        ])
+        self.assertEqual((result.blocks[-1].start_ms, result.blocks[-1].end_ms), (19100, 28400))
+        self.assertEqual(result.blocks[0].start_ms, 11020)
+        self.assertEqual("".join(b.text for b in result.blocks), text)
+        self.assertEqual(audit["slices"][0]["result"]["attempts"][0]["words"], words)
+        self.assertEqual(audit["slices"][0]["result"]["attempts"][1]["method"],
+                         "preserve-parent-speech-edges")
+        translated = _build_sentence_blocks(result.blocks, {
+            0: ["看，你醒了。"], 1: ["晚上好。"],
+            2: ["在被窝里，被光着身子的姐姐们夹成三明治了呢。"],
+        }, preserve_source_timeline=True)
+        serialized = [_serialize_parsed_vtt_block(b) for b in translated]
+        self.assertEqual((serialized[-1]["start_ms"], serialized[-1]["end_ms"]), (19100, 28400))
+        self.assertEqual(serialized[-1]["source_text"], result.blocks[-1].text)
+        self.assertTrue(all(b.speaker == "speaker-1" for b in translated))
+        self.assertEqual((source.start_ms, source.end_ms, source.text), (11020, 28400, text))
 
     def test_invalid_qwen_configuration_is_rejected(self):
         for kwargs in ({"max_sentence_count": 0}, {"max_sentence_duration_ms": 1},

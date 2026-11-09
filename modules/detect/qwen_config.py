@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import math
 
 
-QWEN_PIPELINE_VERSION = 2
+QWEN_PIPELINE_VERSION = 3
 
 
 @dataclass(frozen=True)

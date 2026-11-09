@@ -102,6 +102,22 @@ def _infer_sentence_type(curr_surface: str, inter_punct: str) -> str:
     return "statement"
 
 
+def _continues_phrase(curr_surface: str, next_surface: str, remaining_text: str,
+                      inter_punct: str) -> bool:
+    """Recognize attached particles/auxiliaries even when Qwen splits their words.
+
+    ASMR pauses and ellipses can occur inside a predicate. They must not detach
+    its suffix; explicit sentence-final punctuation still owns a real boundary.
+    """
+    if any(ch in _HARD_TERMINAL_PUNCT for ch in inter_punct):
+        return False
+    return (
+        curr_surface in _BINDING_PARTICLES
+        or next_surface in _CONTINUATION_FOLLOWERS
+        or lexical(remaining_text).startswith(_CONTINUATION_FOLLOWER_PREFIXES)
+    )
+
+
 def _score_qwen_word_boundary(
     curr_surface: str,
     next_surface: str,
@@ -206,16 +222,24 @@ class QwenSentencePartitioner:
                     gap_ms,
                     self.config,
                 )
+                protected = _continues_phrase(
+                    words[idx]["text"], words[idx + 1]["text"],
+                    text[char_end:], inter_punct,
+                )
+                if protected:
+                    score, should_cut = 0.0, False
             else:
                 gap_ms = 0
                 score = 1.0
                 should_cut = True
+                protected = False
                 sentence_type = _infer_sentence_type(words[idx]["text"], inter_punct)
             word_meta.append({
                 "char_end": len(text) if idx == len(words) - 1 else char_end,
                 "gap_ms": gap_ms,
                 "score": score,
                 "should_cut": should_cut,
+                "protected_continuation": protected,
                 "sentence_type": sentence_type,
             })
 
@@ -251,7 +275,8 @@ class QwenSentencePartitioner:
             char_cursor = meta["char_end"]
         candidate_ends.append(len(words) - 1)
 
-        # Subdivide any segment exceeding max_sentence_duration_ms at the best internal pause/boundary.
+        # Prefer the duration limit, but never force a cut through an attached
+        # suffix or through adjacent word pieces without an acoustic boundary.
         final_ends: list[int] = []
         seg_start = 0
         for seg_end in candidate_ends:
@@ -265,6 +290,10 @@ class QwenSentencePartitioner:
                 best_cut = None
                 best_key = None
                 for mid in range(s_idx, e_idx):
+                    meta = word_meta[mid]
+                    if (meta["protected_continuation"]
+                            or (not meta["should_cut"] and meta["gap_ms"] < 160)):
+                        continue
                     left_dur = words[mid]["end_ms"] - words[s_idx]["start_ms"]
                     right_dur = words[e_idx]["end_ms"] - words[mid + 1]["start_ms"]
                     if left_dur < min_dur or right_dur < min_dur:

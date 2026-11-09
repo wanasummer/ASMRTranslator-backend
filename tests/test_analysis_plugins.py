@@ -107,7 +107,7 @@ class AnalysisAdapters(unittest.TestCase):
             result = stage.run(DetectStageInput((source,)), directory)
             audit = json.loads(read_text(Path(directory) / "detect_output/sentence_alignment.json"))
         self.assertEqual([row.text for row in result.blocks], ["今日は休みです。", "明日は仕事です。"])
-        self.assertEqual([(row.start_ms, row.end_ms) for row in result.blocks], [(1100, 2400), (2700, 4600)])
+        self.assertEqual([(row.start_ms, row.end_ms) for row in result.blocks], [(1000, 2400), (2700, 5000)])
         self.assertEqual(
             [(row.aligned_sentence.source_block_id, row.aligned_sentence.source_start_ms, row.aligned_sentence.source_end_ms)
              for row in result.blocks],
@@ -122,7 +122,7 @@ class AnalysisAdapters(unittest.TestCase):
             0: ["今天休息。", "不需要上班。"], 1: ["明天要工作。"],
         }, preserve_source_timeline=True)
         self.assertEqual([(row.start_ms, row.end_ms, row.text) for row in translated], [
-            (1100, 2400, "今天休息。不需要上班。"), (2700, 4600, "明天要工作。"),
+            (1000, 2400, "今天休息。不需要上班。"), (2700, 5000, "明天要工作。"),
         ])
         self.assertEqual([row.source_text for row in translated], [row.text for row in result.blocks])
         serialized = [_serialize_parsed_vtt_block(row) for row in translated]
@@ -154,7 +154,7 @@ class AnalysisAdapters(unittest.TestCase):
             [b.text for b in result.blocks],
             ["はぁ...はぁ...お姉さんにいっぱい甘えましょうね。", "気持ちよくなりましょうね。"],
         )
-        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(100, 3200), (3800, 6800)])
+        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(0, 3200), (3800, 8000)])
 
     def test_qwen_short_single_word_expands_to_min_duration_without_failing(self):
         parent = AsrSlice("slice-short", 128900, 130460, 128900, 130460, ("region-1",))
@@ -199,7 +199,7 @@ class AnalysisAdapters(unittest.TestCase):
         result = aligner.align(AlignmentRequest(parent, parent.id, detection))
         self.assertEqual(result.outcome, "aligned")
         self.assertEqual([b.text for b in result.blocks], ["あ今日は休みです", "明日は仕事です"])
-        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(1000, 2800), (3550, 5500)])
+        self.assertEqual([(b.start_ms, b.end_ms) for b in result.blocks], [(1000, 2800), (3550, 6000)])
 
     def test_qwen_failure_retains_parent_and_reports_fallback(self):
         parent, detection = self.detection()
