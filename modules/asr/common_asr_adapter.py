@@ -179,6 +179,10 @@ class CommonASRAdapter(ASRAdapter):
         raw_blocks = payload.get("blocks")
         if not isinstance(raw_blocks, list) or len(raw_blocks) != len(requested_segments):
             raise ASRError("自定义 ASR 返回块数量与外部分段不一致")
+        raw_boost_cfg = payload.get("asr_boost")
+        if not isinstance(raw_boost_cfg, dict) and isinstance(payload.get("metadata"), dict):
+            raw_boost_cfg = payload["metadata"].get("asr_boost")
+        boost_config = dict(raw_boost_cfg) if isinstance(raw_boost_cfg, dict) else None
         blocks: list[VTTBlock] = []
         for position, (raw, requested) in enumerate(zip(raw_blocks, requested_segments)):
             try:
@@ -192,7 +196,35 @@ class CommonASRAdapter(ASRAdapter):
                 requested["index"], requested["start_ms"], requested["end_ms"]
             ):
                 raise ASRError(f"自定义 ASR 改写了外部分段边界：blocks[{position}]")
-            blocks.append(VTTBlock(index, start_ms, end_ms, text, skip_tts=False))
+            raw_spans = raw.get("spans")
+            parsed_spans = []
+            if isinstance(raw_spans, list):
+                for item in raw_spans:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        s_start = int(item["start_ms"])
+                        s_end = int(item["end_ms"])
+                        s_text = str(item.get("text") or "").strip()
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if s_text and s_end > s_start:
+                        parsed_spans.append({
+                            "start_ms": s_start,
+                            "end_ms": s_end,
+                            "text": s_text,
+                        })
+            blocks.append(
+                VTTBlock(
+                    index,
+                    start_ms,
+                    end_ms,
+                    text,
+                    skip_tts=False,
+                    asr_boost_spans=tuple(parsed_spans),
+                    asr_boost_config=boost_config,
+                )
+            )
         return CommonASRDocumentResult(
             language=language,
             blocks=blocks,

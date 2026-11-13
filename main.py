@@ -262,7 +262,7 @@ Examples:
                         dest="detect_stage", action="store_true",
                         help="Enable Japanese sentence detection after ASR and before cleanup")
     parser.add_argument("--sentence-aligner", type=str, default="joint-vad",
-                        choices=["joint-vad", "qwen-force-align", "moss-native"],
+                        choices=["joint-vad", "qwen-force-align", "moss-native", "asr-boost"],
                         help="Detect-stage pipeline (default: joint-vad; MOSS ASR requires moss-native)")
     parser.add_argument("--qwen-align-endpoint", default="http://127.0.0.1:8007")
     parser.add_argument("--uvr-enabled", action="store_true", help="Prepare a separate UVR analysis track before VAD/ASR")

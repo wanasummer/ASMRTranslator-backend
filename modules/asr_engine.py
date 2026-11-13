@@ -449,6 +449,7 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
     """
     ordered = _collapse_overlapping_slices(slices)
     text_by_slice: list[list[str]] = [[] for _ in ordered]
+    spans_by_slice: list[list[dict]] = [[] for _ in ordered]
 
     def _assign(sent):
         # Prefer the slice containing the sentence start; fall back to the
@@ -467,9 +468,14 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
         idx = _assign(s)
         if idx is not None:
             text_by_slice[idx].append(s.text)
+            spans_by_slice[idx].append({
+                "start_ms": round(s.start * 1000),
+                "end_ms": round(s.end * 1000),
+                "text": s.text,
+            })
 
     out: list[VTTBlock] = []
-    for i, (r, parts) in enumerate(zip(ordered, text_by_slice)):
+    for i, (r, parts, spans) in enumerate(zip(ordered, text_by_slice, spans_by_slice)):
         if not parts:
             continue
         out.append(VTTBlock(
@@ -479,6 +485,7 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
             text="".join(parts),
             asr_slice=getattr(r, "asr_slice", None),
             source_text="".join(parts),
+            asr_boost_spans=tuple(spans),
         ))
     return out
 

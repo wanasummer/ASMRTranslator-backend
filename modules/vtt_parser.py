@@ -4,7 +4,7 @@
     This module exists so existing code (pipeline.py) doesn't break.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Protocol
 
 from .subtitles import SubtitleBlock, parse_subtitle
@@ -39,6 +39,8 @@ class VTTBlock:
     cleaned_source_text: str = ""
     aligned_sentence: AlignmentMetadata | None = None
     translation_available: bool = False
+    asr_boost_spans: tuple = field(default=(), compare=False)
+    asr_boost_config: Optional[dict] = field(default=None, compare=False)
     # The voiced (speech-only) span as-authored (used by loudness matching to
     # measure just the speech of the pink slice). Kept for backward
     # compatibility — the new pink-segment geometry carries the coverage instead.

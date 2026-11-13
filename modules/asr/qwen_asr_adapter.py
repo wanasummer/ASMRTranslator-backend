@@ -413,6 +413,24 @@ class FunASRAdapter(ASRAdapter):
         for sentence in sentences:
             if not isinstance(sentence, dict):
                 continue
+            words = sentence.get("words")
+            if isinstance(words, list) and words:
+                parsed_words = 0
+                for word in words:
+                    if not isinstance(word, dict):
+                        continue
+                    w_text = str(word.get("text") or "").strip() + str(word.get("punctuation") or "").strip()
+                    if not w_text:
+                        continue
+                    w_begin = word.get("begin_time", word.get("start_time", 0))
+                    w_end = word.get("end_time", word.get("end", w_begin))
+                    try:
+                        segments.append(ASRSegment(text=w_text, start=float(w_begin) / 1000, end=float(w_end) / 1000))
+                        parsed_words += 1
+                    except (TypeError, ValueError):
+                        continue
+                if parsed_words > 0:
+                    continue
             text = str(sentence.get("text") or "").strip()
             if not text:
                 continue

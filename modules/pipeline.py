@@ -455,7 +455,8 @@ def run_pipeline(
                                  vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
                                  sentence_detector=sentence_detector,
                                  moss_recalibrate=moss_recalibrate,
-                                 moss_endpoint=(asr_kwargs or {}).get("endpoint"))
+                                 moss_endpoint=(asr_kwargs or {}).get("endpoint"),
+                                 asr_backend=asr_backend)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
     detect_enabled = detect_eligible(
         detect_enabled, vtt_path, asr_backend,

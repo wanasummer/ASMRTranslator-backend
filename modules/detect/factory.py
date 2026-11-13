@@ -1,8 +1,13 @@
 """Composition root for the replaceable detect stage."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .aligners import create_sentence_aligner
+from .asr_boost_factory import (
+    asr_boost_cache_signature,
+    asr_boost_supports,
+    create_asr_boost_stage,
+)
 from .atom_detectors import create_atom_detector
 from .contracts import AlignmentDependencies, DetectConfig, DetectError, DetectStage
 from .duration import create_duration_estimator
@@ -22,9 +27,11 @@ DEDICATED_PIPELINES = {"moss-transcribe-diarize": "moss-native"}
 
 
 def detect_pipeline_supports(aligner: str, backend: str) -> bool:
-    """moss-native is exclusive to MOSS; MOSS defaults to moss-native but supports generic aligners."""
+    """moss-native is exclusive to MOSS; asr-boost requires a boost-capable ASR backend."""
     if aligner == "moss-native":
         return backend == "moss-transcribe-diarize"
+    if aligner == "asr-boost":
+        return asr_boost_supports(backend)
     return True
 
 
@@ -52,6 +59,9 @@ def _joint_cache_signature(config: DetectConfig) -> dict:
     settings.pop("qwen")
     settings.pop("qwen_endpoint")
     settings.pop("moss")
+    settings.pop("asr_boost", None)
+    settings.pop("asr_backend", None)
+    settings.pop("asr_boost_padding_ms", None)
     signature = {"pipeline": "joint-vad", "version": 1, "settings": settings}
     if config.atom_detector == "asmr-vad":
         from ..vad.factory import resolve_vad_config
@@ -70,6 +80,7 @@ STAGE_FACTORIES = {
     "moss-native": lambda config, audio_path: MossDetectStage(config.moss_settings(), audio_path),
     "joint-vad": _create_builtin_mecab_stage,
     "qwen-force-align": _create_qwen_force_align_stage,
+    "asr-boost": create_asr_boost_stage,
 }
 
 CACHE_SIGNATURES = {
@@ -77,6 +88,7 @@ CACHE_SIGNATURES = {
                                   "settings": asdict(config.moss_settings())},
     "joint-vad": _joint_cache_signature,
     "qwen-force-align": _qwen_cache_signature,
+    "asr-boost": asr_boost_cache_signature,
 }
 
 
@@ -90,6 +102,8 @@ def validate_detect_selection(config: DetectConfig, backend: str) -> DetectConfi
             "DETECT_BACKEND_INCOMPATIBLE",
             f"Detect pipeline {config.aligner} does not support ASR backend {backend}",
         )
+    if config.aligner == "asr-boost" and config.asr_backend != backend:
+        config = replace(config, asr_backend=backend)
     return config
 
 

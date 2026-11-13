@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from ..vad.contracts import AsrSlice, VadRegion
+from .asr_boost_config import AsrBoostConfig
 from .qwen_config import QwenConfig
 from .moss_config import MossDetectConfig
 
@@ -187,8 +188,20 @@ class DetectConfig:
     vocalization_run: int = 5
     qwen: QwenConfig | None = None
     moss: MossDetectConfig | None = None
+    asr_boost: AsrBoostConfig | None = None
+    asr_backend: str = "fish-asr"
+    asr_boost_padding_ms: int = 250
     moss_recalibrate: bool = False
     moss_endpoint: str | None = None
+
+    def asr_boost_settings(self) -> AsrBoostConfig:
+        if self.asr_boost is not None:
+            return self.asr_boost
+        return AsrBoostConfig(
+            padding_ms=self.asr_boost_padding_ms,
+            min_duration_ms=self.min_sentence_duration_ms,
+            backend=self.asr_backend,
+        )
 
     def moss_settings(self) -> MossDetectConfig:
         return self.moss or MossDetectConfig(
