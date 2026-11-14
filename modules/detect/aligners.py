@@ -97,8 +97,38 @@ class JointVadSentenceAligner:
 
         if value.bypass_reason:
             return fallback(value.bypass_reason, outcome="bypassed")
+        boost_plan = getattr(value, "asr_boost_plan", None)
+        if boost_plan is not None and not boost_plan.enabled:
+            return fallback(boost_plan.reason or "plugin_disabled", outcome="bypassed")
         if detection.reason or not detection.tokens:
             return fallback(detection.reason or "no_tokens")
+
+        if boost_plan is not None and len(boost_plan.sentences) == 1:
+            final_type = (
+                detection.boundaries[-1].sentence_type
+                if detection.boundaries
+                else "statement"
+            )
+            return AlignmentResult(
+                (
+                    AlignedSentenceBlock(
+                        f"{parent.id}-sentence-0",
+                        value.source_block_id,
+                        boost_plan.locked_start_ms,
+                        boost_plan.locked_end_ms,
+                        boost_plan.sentences[0].text or detection.normalized_text,
+                        parent.region_ids,
+                        f"asr-boost:{boost_plan.backend}+joint-vad-exact",
+                        "high",
+                        final_type,
+                        parent.speech_start_ms,
+                        parent.speech_end_ms,
+                    ),
+                ),
+                (),
+                "exact",
+                timings=(),
+            )
 
         started = self.clock()
         try:
@@ -111,17 +141,57 @@ class JointVadSentenceAligner:
                 "thresholdMs": config.atom_silence_ms,
                 "elapsedMs": round((self.clock() - started) * 1000),
             })
-            return fallback("atom_detection_failed")
-        timings.append({
-            "thresholdMs": config.atom_silence_ms,
-            "elapsedMs": round((self.clock() - started) * 1000),
-        })
-        attempts.append({
-            "thresholdMs": config.atom_silence_ms,
-            "regionCount": len(atoms),
-            "regions": atoms,
-            "parseConfidence": detection.parse_confidence,
-        })
+            if boost_plan is None or len(boost_plan.sentences) <= 1:
+                return fallback("atom_detection_failed")
+            atoms = ()
+        else:
+            timings.append({
+                "thresholdMs": config.atom_silence_ms,
+                "elapsedMs": round((self.clock() - started) * 1000),
+            })
+            attempts.append({
+                "thresholdMs": config.atom_silence_ms,
+                "regionCount": len(atoms),
+                "regions": atoms,
+                "parseConfidence": detection.parse_confidence,
+            })
+
+        if boost_plan is not None and len(boost_plan.sentences) >= 2:
+            from .asr_boost_stage import calibrate_boost_plan_with_atoms
+
+            aligned_ranges, cut_audits = calibrate_boost_plan_with_atoms(
+                boost_plan,
+                atoms,
+                audio_path=self.audio_path,
+            )
+            if len(aligned_ranges) <= 1:
+                return fallback("duration_below_minimum")
+            attempts.append({
+                "method": f"asr-boost:{boost_plan.backend}+joint-vad",
+                "cutAudits": cut_audits,
+            })
+            blocks = tuple(
+                AlignedSentenceBlock(
+                    f"{parent.id}-sentence-{ordinal}",
+                    value.source_block_id,
+                    start_ms,
+                    end_ms,
+                    part_text,
+                    parent.region_ids,
+                    f"asr-boost:{boost_plan.backend}+joint-vad",
+                    "high",
+                    "statement",
+                    parent.speech_start_ms,
+                    parent.speech_end_ms,
+                )
+                for ordinal, (start_ms, end_ms, part_text) in enumerate(aligned_ranges)
+            )
+            return AlignmentResult(
+                blocks,
+                tuple(attempts),
+                "aligned",
+                timings=tuple(timings),
+            )
         if (
             not atoms
             or any(

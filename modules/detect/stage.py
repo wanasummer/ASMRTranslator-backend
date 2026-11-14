@@ -48,12 +48,15 @@ def _vocalization_reason(text, config):
 class DefaultDetectStage:
     """Coordinate injected analysis/alignment implementations and persistence."""
 
-    def __init__(self, config: DetectConfig, sentence_detector, aligner):
+    def __init__(self, config: DetectConfig, sentence_detector, aligner, *, asr_boost=None):
         self.config = config
         self.sentence_detector = sentence_detector
         self.aligner = aligner
+        self.asr_boost = asr_boost
 
     def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
+        if self.asr_boost is not None:
+            value = self.asr_boost.prepare(value, output_dir)
         asr_blocks = value.asr_blocks
         write_detect_artifact(
             output_dir,
@@ -90,6 +93,7 @@ class DefaultDetectStage:
             )
             bypass_reason = (
                 "skip_tts" if block.skip_tts
+                else "plugin_disabled" if getattr(getattr(block, "asr_boost_plan", None), "enabled", True) is False
                 else _vocalization_reason(source_text, self.config)
             )
             request = AlignmentRequest(
@@ -97,6 +101,7 @@ class DefaultDetectStage:
                 parent.id,
                 detection,
                 bypass_reason,
+                asr_boost_plan=getattr(block, "asr_boost_plan", None),
             )
             result = self.aligner.align(request)
             records.append((parent.id, detection, request, result))

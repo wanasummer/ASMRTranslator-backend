@@ -6,6 +6,7 @@ from .aligners import create_sentence_aligner
 from .asr_boost_factory import (
     asr_boost_cache_signature,
     asr_boost_supports,
+    create_asr_boost_pre_stage,
     create_asr_boost_stage,
 )
 from .atom_detectors import create_atom_detector
@@ -47,11 +48,11 @@ def _create_builtin_mecab_stage(config: DetectConfig, audio_path: str) -> Detect
         partitioner,
     )
     aligner = create_sentence_aligner(config.aligner, config, dependencies)
-    return DefaultDetectStage(config, sentence_detector, aligner)
+    return DefaultDetectStage(config, sentence_detector, aligner, asr_boost=create_asr_boost_pre_stage(config))
 
 
 def _create_qwen_force_align_stage(config: DetectConfig, audio_path: str) -> DetectStage:
-    return QwenForceAlignDetectStage(config.qwen_settings(), audio_path)
+    return QwenForceAlignDetectStage(config.qwen_settings(), audio_path, asr_boost=create_asr_boost_pre_stage(config))
 
 
 def _joint_cache_signature(config: DetectConfig) -> dict:
@@ -102,7 +103,7 @@ def validate_detect_selection(config: DetectConfig, backend: str) -> DetectConfi
             "DETECT_BACKEND_INCOMPATIBLE",
             f"Detect pipeline {config.aligner} does not support ASR backend {backend}",
         )
-    if config.aligner == "asr-boost" and config.asr_backend != backend:
+    if config.asr_backend != backend:
         config = replace(config, asr_backend=backend)
     return config
 

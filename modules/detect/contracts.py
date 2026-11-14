@@ -83,6 +83,7 @@ class AlignmentRequest:
     source_block_id: str
     detection: SentenceDetection
     bypass_reason: str | None = None
+    asr_boost_plan: object | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

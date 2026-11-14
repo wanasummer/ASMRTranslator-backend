@@ -93,6 +93,9 @@ class QwenForceAlignSentenceAligner:
 
         if value.bypass_reason:
             return fallback(value.bypass_reason, "bypassed")
+        boost_plan = getattr(value, "asr_boost_plan", None)
+        if boost_plan is not None and not boost_plan.enabled:
+            return fallback(boost_plan.reason or "plugin_disabled", "bypassed")
         if detection.reason or not lexical(text):
             return fallback(detection.reason or "no_tokens")
         started = time.monotonic()
@@ -136,6 +139,18 @@ class QwenForceAlignSentenceAligner:
                 raw_spans.append((start, end, text_slice, meta))
                 word_start = word_end + 1
                 char_start = char_end
+
+            if boost_plan is not None and boost_plan.boundaries and len(raw_spans) == len(boost_plan.sentences):
+                constrained_spans: list[tuple[int, int, str, dict]] = []
+                for idx, (start, end, text_slice, meta) in enumerate(raw_spans):
+                    if idx > 0:
+                        b_prev = boost_plan.boundaries[idx - 1]
+                        start = max(b_prev.search_start_ms, min(b_prev.search_end_ms, start))
+                    if idx < len(raw_spans) - 1:
+                        b_next = boost_plan.boundaries[idx]
+                        end = max(b_next.search_start_ms, min(b_next.search_end_ms, end))
+                    constrained_spans.append((start, end, text_slice, meta))
+                raw_spans = constrained_spans
 
             groups: list[AlignedSentenceBlock] = []
             edge_adjustments = []
@@ -196,6 +211,35 @@ class QwenForceAlignSentenceAligner:
                 "method": "qwen-force-align",
                 "elapsedMs": round((time.monotonic() - started) * 1000),
             })
+            if boost_plan is not None and len(boost_plan.sentences) >= 2:
+                from .asr_boost_stage import calibrate_boost_plan_with_atoms
+
+                aligned_ranges, cut_audits = calibrate_boost_plan_with_atoms(
+                    boost_plan, (), audio_path=self.audio_path
+                )
+                if len(aligned_ranges) >= 2:
+                    attempts.append({"method": f"asr-boost:{boost_plan.backend}", "cutAudits": cut_audits})
+                    return AlignmentResult(
+                        tuple(
+                            AlignedSentenceBlock(
+                                f"{parent.id}-sentence-{i}",
+                                value.source_block_id,
+                                s_ms,
+                                e_ms,
+                                p_text,
+                                parent.region_ids,
+                                f"asr-boost:{boost_plan.backend}+qwen-fallback",
+                                "medium",
+                                "statement",
+                                parent.speech_start_ms,
+                                parent.speech_end_ms,
+                            )
+                            for i, (s_ms, e_ms, p_text) in enumerate(aligned_ranges)
+                        ),
+                        tuple(attempts),
+                        "aligned",
+                        timings=tuple(timings),
+                    )
             return fallback("forced_alignment_failed")
         timings.append({
             "method": "qwen-force-align",
@@ -218,12 +262,16 @@ class QwenForceAlignDetectStage:
         audio_path: str,
         *,
         aligner: QwenForceAlignSentenceAligner | None = None,
+        asr_boost=None,
     ):
         self.config = config.qwen_settings() if isinstance(config, DetectConfig) else config
         self.audio_path = audio_path
         self.aligner = aligner or QwenForceAlignSentenceAligner(self.config, audio_path)
+        self.asr_boost = asr_boost
 
     def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
+        if self.asr_boost is not None:
+            value = self.asr_boost.prepare(value, output_dir)
         asr_blocks = value.asr_blocks
         write_detect_artifact(
             output_dir,
@@ -269,6 +317,8 @@ class QwenForceAlignDetectStage:
             bypass_reason = (
                 "skip_tts"
                 if block.skip_tts
+                else "plugin_disabled"
+                if getattr(getattr(block, "asr_boost_plan", None), "enabled", True) is False
                 else ("empty_asr" if not has_lexical else None)
             )
             request = AlignmentRequest(
@@ -276,6 +326,7 @@ class QwenForceAlignDetectStage:
                 parent.id,
                 detection,
                 bypass_reason,
+                asr_boost_plan=getattr(block, "asr_boost_plan", None),
             )
             result = self.aligner.align(request)
             records.append((parent.id, detection, request, result))

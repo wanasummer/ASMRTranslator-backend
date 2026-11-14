@@ -41,6 +41,7 @@ class VTTBlock:
     translation_available: bool = False
     asr_boost_spans: tuple = field(default=(), compare=False)
     asr_boost_config: Optional[dict] = field(default=None, compare=False)
+    asr_boost_plan: Optional[object] = field(default=None, compare=False)
     # The voiced (speech-only) span as-authored (used by loudness matching to
     # measure just the speech of the pink slice). Kept for backward
     # compatibility — the new pink-segment geometry carries the coverage instead.

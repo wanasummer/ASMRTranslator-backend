@@ -26,7 +26,7 @@ from modules.detect import (
 from modules.detect.asr_boost_stage import align_sentence_spans
 from modules.storage import read_json
 from modules.vad import optimize_asmr_segments
-from modules.vad.contracts import AsrSlice
+from modules.vad.contracts import AsrSlice, VadRegion
 from modules.vad.models import SpeechRegion
 from modules.vtt_parser import VTTBlock
 
@@ -266,6 +266,66 @@ class AsrBoostDetectTests(unittest.TestCase):
         self.assertEqual(detected.blocks[0].end_ms, 12300)
         self.assertEqual(detected.blocks[1].start_ms, 12300)
         self.assertEqual(detected.blocks[1].end_ms, 15000)
+
+    def test_asr_boost_carves_intervals_then_joint_vad_and_qwen_aligners_calibrate(self):
+        # 1. ASR-boost pre-stage -> Joint-VAD aligner calibration
+        joint_cfg = validate_detect_selection(DetectConfig(aligner="joint-vad", asr_boost_padding_ms=250), "common-asr")
+        joint_stage = create_detect_stage(joint_cfg, "missing.wav")
+        # Fine VAD atoms have a silence gap [1960, 2040] (midpoint 2000ms) inside the ±250ms window [1570, 2330].
+        joint_stage.aligner.atom_detector = Mock(
+            detect=Mock(
+                return_value=(
+                    VadRegion("atom-0", 1000, 1960),
+                    VadRegion("atom-1", 2040, 4000),
+                )
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            joint_res = joint_stage.run(DetectStageInput((self.block,)), directory)
+            intervals = read_json(directory + "/detect_output/asr_boost_intervals.json")
+            audit = read_json(directory + "/detect_output/sentence_alignment.json")
+
+        self.assertEqual(intervals["slices"][0]["locked_start_ms"], 1000)
+        self.assertEqual(intervals["slices"][0]["locked_end_ms"], 4000)
+        self.assertEqual(intervals["slices"][0]["boundaries"][0]["search_start_ms"], 1570)
+        self.assertEqual(intervals["slices"][0]["boundaries"][0]["search_end_ms"], 2330)
+        self.assertEqual([b.text for b in joint_res.blocks], ["こんにちは。", "はい。"])
+        self.assertEqual(joint_res.blocks[0].start_ms, 1000)
+        self.assertEqual(joint_res.blocks[0].end_ms, 2000)
+        self.assertEqual(joint_res.blocks[1].start_ms, 2000)
+        self.assertEqual(joint_res.blocks[1].end_ms, 4000)
+        self.assertEqual(audit["slices"][0]["result"]["attempts"][-1]["cutAudits"][0]["calibrator"], "vad-atom")
+
+        # 2. ASR-boost pre-stage -> Qwen Force Align calibration (clamping drifted Qwen boundary to ±padding_ms window)
+        qwen_cfg = validate_detect_selection(DetectConfig(aligner="qwen-force-align", asr_boost_padding_ms=250), "common-asr")
+        qwen_stage = create_detect_stage(qwen_cfg, "missing.wav")
+        # Qwen returns word timestamps relative to speech_start_ms (1000ms):
+        # Word 0 ends at 1000 + 400 = 1400ms (drifted before 1570ms window start);
+        # Word 1 starts at 1000 + 1020 = 2020ms (inside [1570, 2330] window).
+        qwen_stage.aligner.client = Mock(
+            request=Mock(
+                return_value=(
+                    {
+                        "words": [
+                            {"text": "こんにちは", "start_ms": 50, "end_ms": 400},
+                            {"text": "はい", "start_ms": 1020, "end_ms": 2900},
+                        ]
+                    },
+                    3000,
+                )
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            qwen_res = qwen_stage.run(DetectStageInput((self.block,)), directory)
+            qwen_intervals = read_json(directory + "/detect_output/asr_boost_intervals.json")
+
+        self.assertEqual(qwen_intervals["slices"][0]["boundaries"][0]["search_start_ms"], 1570)
+        self.assertEqual([b.text for b in qwen_res.blocks], ["こんにちは。", "はい。"])
+        self.assertEqual(qwen_res.blocks[0].start_ms, 1000)
+        # First sentence end_ms is clamped from drifted 1400ms into the boost search window [1570, 2330] -> 1570ms.
+        self.assertEqual(qwen_res.blocks[0].end_ms, 1570)
+        self.assertEqual(qwen_res.blocks[1].start_ms, 2020)
+        self.assertEqual(qwen_res.blocks[1].end_ms, 4000)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,19 @@
-"""ASR-boost sentence detection stage using coarse VAD outer bounds and padded internal cuts."""
+"""ASR-boost interval pre-stage and boundary calibration helpers for Japanese sentence detection."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
+from typing import Sequence
 
-from ..vad.contracts import AsrSlice
+from ..vad.contracts import AsrSlice, VadRegion
 from .artifacts import write_detect_artifact
 from .asr_boost_config import ASR_BOOST_POLICY_VERSION, AsrBoostConfig
-from .asr_boost_factory import AsrBoostAdapter, AsrBoostSpan, create_asr_boost_adapter
+from .asr_boost_factory import (
+    AsrBoostAdapter,
+    AsrBoostSpan,
+    create_asr_boost_adapter,
+    has_custom_boost_hook,
+)
 from .contracts import (
     AlignedSentenceBlock,
     DetectError,
@@ -16,6 +22,48 @@ from .contracts import (
 )
 from .duration import count_japanese_mora
 from .moss_stage import _lexical, _refine_boundary_by_energy, native_sentences
+
+
+@dataclass(frozen=True)
+class AsrBoostBoundaryWindow:
+    """Padded search interval [search_start_ms, search_end_ms] for an internal sentence boundary."""
+
+    boundary_index: int
+    raw_prev_end_ms: int
+    raw_next_start_ms: int
+    anchor_ms: int
+    search_start_ms: int
+    search_end_ms: int
+    padding_ms: int
+
+
+@dataclass(frozen=True)
+class AsrBoostSentenceWindow:
+    """Sentence unit with outer VAD bounds locked at edges and padded windows internally."""
+
+    index: int
+    text: str
+    raw_start_ms: int
+    raw_end_ms: int
+    window_start_ms: int
+    window_end_ms: int
+
+
+@dataclass(frozen=True)
+class AsrBoostPlan:
+    """Interval plan carved by ASR-boost and consumed by the downstream sentence aligner."""
+
+    slice_id: str
+    backend: str
+    enabled: bool
+    padding_ms: int
+    min_duration_ms: int
+    locked_start_ms: int
+    locked_end_ms: int
+    sentences: tuple[AsrBoostSentenceWindow, ...]
+    boundaries: tuple[AsrBoostBoundaryWindow, ...]
+    input_spans: tuple[AsrBoostSpan, ...] = ()
+    reason: str | None = None
 
 
 def _ends_with_sentence_punctuation(text: str) -> bool:
@@ -94,6 +142,214 @@ def _group_spans_into_sentences(
     return tuple(grouped)
 
 
+def build_asr_boost_plan(
+    block: object,
+    parent: AsrSlice,
+    base_config: AsrBoostConfig,
+    adapter: AsrBoostAdapter,
+) -> AsrBoostPlan:
+    """Carve sentence intervals and internal ±padding_ms boundary windows for a coarse VAD slice."""
+    effective_cfg = adapter.resolve_config(block, base_config)
+    speech_start = parent.speech_start_ms
+    speech_end = parent.speech_end_ms
+    source_text = (getattr(block, "source_text", "") or getattr(block, "text", "") or "").strip()
+
+    if not effective_cfg.enabled:
+        return AsrBoostPlan(
+            slice_id=parent.id,
+            backend=adapter.backend,
+            enabled=False,
+            padding_ms=effective_cfg.padding_ms,
+            min_duration_ms=effective_cfg.min_duration_ms,
+            locked_start_ms=speech_start,
+            locked_end_ms=speech_end,
+            sentences=(),
+            boundaries=(),
+            reason="plugin_disabled",
+        )
+
+    if getattr(block, "skip_tts", False) or not source_text or not _lexical(source_text):
+        return AsrBoostPlan(
+            slice_id=parent.id,
+            backend=adapter.backend,
+            enabled=True,
+            padding_ms=effective_cfg.padding_ms,
+            min_duration_ms=effective_cfg.min_duration_ms,
+            locked_start_ms=speech_start,
+            locked_end_ms=speech_end,
+            sentences=(),
+            boundaries=(),
+            reason="skip_tts" if getattr(block, "skip_tts", False) else "empty_asr",
+        )
+
+    raw_spans = adapter.extract_spans(block, parent)
+    if not raw_spans:
+        raw_spans = (
+            AsrBoostSpan(
+                start_ms=speech_start,
+                end_ms=speech_end,
+                text=source_text,
+            ),
+        )
+    sentence_spans = _group_spans_into_sentences(raw_spans, effective_cfg)
+    n = len(sentence_spans)
+    if n <= 1:
+        text = sentence_spans[0].text if sentence_spans else source_text
+        return AsrBoostPlan(
+            slice_id=parent.id,
+            backend=adapter.backend,
+            enabled=True,
+            padding_ms=effective_cfg.padding_ms,
+            min_duration_ms=effective_cfg.min_duration_ms,
+            locked_start_ms=speech_start,
+            locked_end_ms=speech_end,
+            sentences=(
+                AsrBoostSentenceWindow(
+                    index=0,
+                    text=text,
+                    raw_start_ms=speech_start,
+                    raw_end_ms=speech_end,
+                    window_start_ms=speech_start,
+                    window_end_ms=speech_end,
+                ),
+            ),
+            boundaries=(),
+            input_spans=raw_spans,
+            reason="single_sentence",
+        )
+
+    boundaries: list[AsrBoostBoundaryWindow] = []
+    for idx in range(1, n):
+        prev_span = sentence_spans[idx - 1]
+        next_span = sentence_spans[idx]
+        raw_prev_end = max(speech_start, min(speech_end, prev_span.end_ms))
+        raw_next_start = max(raw_prev_end, min(speech_end, next_span.start_ms))
+        anchor_ms = (raw_prev_end + raw_next_start) // 2
+        search_start = max(speech_start, raw_prev_end - effective_cfg.padding_ms)
+        search_end = min(speech_end, raw_next_start + effective_cfg.padding_ms)
+        if search_end < search_start:
+            search_start = search_end = anchor_ms
+        boundaries.append(
+            AsrBoostBoundaryWindow(
+                boundary_index=idx,
+                raw_prev_end_ms=raw_prev_end,
+                raw_next_start_ms=raw_next_start,
+                anchor_ms=anchor_ms,
+                search_start_ms=search_start,
+                search_end_ms=search_end,
+                padding_ms=effective_cfg.padding_ms,
+            )
+        )
+
+    sentences: list[AsrBoostSentenceWindow] = []
+    for idx, span in enumerate(sentence_spans):
+        w_start = speech_start if idx == 0 else boundaries[idx - 1].search_start_ms
+        w_end = speech_end if idx == n - 1 else boundaries[idx].search_end_ms
+        sentences.append(
+            AsrBoostSentenceWindow(
+                index=idx,
+                text=span.text,
+                raw_start_ms=speech_start if idx == 0 else span.start_ms,
+                raw_end_ms=speech_end if idx == n - 1 else span.end_ms,
+                window_start_ms=w_start,
+                window_end_ms=w_end,
+            )
+        )
+
+    return AsrBoostPlan(
+        slice_id=parent.id,
+        backend=adapter.backend,
+        enabled=True,
+        padding_ms=effective_cfg.padding_ms,
+        min_duration_ms=effective_cfg.min_duration_ms,
+        locked_start_ms=speech_start,
+        locked_end_ms=speech_end,
+        sentences=tuple(sentences),
+        boundaries=tuple(boundaries),
+        input_spans=raw_spans,
+    )
+
+
+def calibrate_boost_plan_with_atoms(
+    plan: AsrBoostPlan,
+    atoms: Sequence[VadRegion] = (),
+    audio_path: str | None = None,
+) -> tuple[tuple[tuple[int, int, str], ...], list[dict]]:
+    """Calibrate ASR-boost boundary windows using fine VAD atoms first, then acoustic energy valley."""
+    speech_start = plan.locked_start_ms
+    speech_end = plan.locked_end_ms
+    n = len(plan.sentences)
+    if n <= 1 or (speech_end - speech_start) < n * plan.min_duration_ms:
+        text = "".join(s.text for s in plan.sentences).strip()
+        return ((speech_start, speech_end, text),), []
+
+    atom_gaps: list[tuple[int, int, int, int]] = []
+    for j in range(1, len(atoms)):
+        g_start = atoms[j - 1].speech_end_ms
+        g_end = atoms[j].speech_start_ms
+        g_mid = (g_start + g_end) // 2
+        g_len = max(0, g_end - g_start)
+        atom_gaps.append((g_start, g_end, g_mid, g_len))
+
+    cuts: list[int] = [speech_start]
+    cut_audits: list[dict] = []
+    for idx, b in enumerate(plan.boundaries, start=1):
+        remaining = n - idx
+        min_allowed = cuts[-1] + plan.min_duration_ms
+        max_allowed = speech_end - remaining * plan.min_duration_ms
+        if max_allowed < min_allowed:
+            return ((speech_start, speech_end, "".join(s.text for s in plan.sentences).strip()),), []
+
+        window_start = max(min_allowed, b.search_start_ms)
+        window_end = min(max_allowed, b.search_end_ms)
+        if window_end < window_start:
+            window_start = window_end = max(min_allowed, min(max_allowed, b.anchor_ms))
+
+        clamped_anchor = max(window_start, min(window_end, b.anchor_ms))
+        candidates = [
+            gap for gap in atom_gaps
+            if gap[1] >= window_start and gap[0] <= window_end
+        ]
+        if candidates:
+            best_gap = max(candidates, key=lambda g: (g[3], -abs(g[2] - clamped_anchor)))
+            cut_ms = max(window_start, min(window_end, best_gap[2]))
+            calibrator = "vad-atom"
+        elif audio_path and window_end > window_start:
+            refined = _refine_boundary_by_energy(
+                audio_path,
+                window_start,
+                window_end,
+                clamped_anchor,
+                search_window_ms=plan.padding_ms,
+            )
+            cut_ms = max(window_start, min(window_end, refined))
+            calibrator = "acoustic-energy"
+        else:
+            cut_ms = clamped_anchor
+            calibrator = "anchor"
+
+        cuts.append(cut_ms)
+        cut_audits.append({
+            "boundaryIndex": idx,
+            "rawPrevEndMs": b.raw_prev_end_ms,
+            "rawNextStartMs": b.raw_next_start_ms,
+            "anchorMs": b.anchor_ms,
+            "windowStartMs": window_start,
+            "windowEndMs": window_end,
+            "paddingMs": plan.padding_ms,
+            "cutMs": cut_ms,
+            "driftMs": cut_ms - b.anchor_ms,
+            "calibrator": calibrator,
+        })
+
+    cuts.append(speech_end)
+    aligned = tuple(
+        (cuts[i], cuts[i + 1], plan.sentences[i].text)
+        for i in range(n)
+    )
+    return aligned, cut_audits
+
+
 def align_sentence_spans(
     parent: AsrSlice,
     sentence_spans: tuple[AsrBoostSpan, ...],
@@ -104,65 +360,118 @@ def align_sentence_spans(
     speech_start = parent.speech_start_ms
     speech_end = parent.speech_end_ms
     n = len(sentence_spans)
-    if n <= 1 or (speech_end - speech_start) < n * cfg.min_duration_ms:
+    if n <= 1:
         text = "".join(s.text for s in sentence_spans).strip()
         return ((speech_start, speech_end, text),), []
-
-    cuts: list[int] = [speech_start]
-    cut_audits: list[dict] = []
+    boundaries = []
     for idx in range(1, n):
         prev_span = sentence_spans[idx - 1]
         next_span = sentence_spans[idx]
-        remaining_sentences = n - idx
-        min_allowed = cuts[-1] + cfg.min_duration_ms
-        max_allowed = speech_end - remaining_sentences * cfg.min_duration_ms
-        if max_allowed < min_allowed:
-            return ((speech_start, speech_end, "".join(s.text for s in sentence_spans).strip()),), []
-
         raw_prev_end = max(speech_start, min(speech_end, prev_span.end_ms))
         raw_next_start = max(raw_prev_end, min(speech_end, next_span.start_ms))
         anchor_ms = (raw_prev_end + raw_next_start) // 2
-        window_start = max(min_allowed, raw_prev_end - cfg.padding_ms)
-        window_end = min(max_allowed, raw_next_start + cfg.padding_ms)
-        if window_end < window_start:
-            window_start = window_end = max(min_allowed, min(max_allowed, anchor_ms))
-
-        clamped_anchor = max(window_start, min(window_end, anchor_ms))
-        if audio_path and window_end > window_start:
-            refined = _refine_boundary_by_energy(
-                audio_path,
-                window_start,
-                window_end,
-                clamped_anchor,
-                search_window_ms=cfg.padding_ms,
+        boundaries.append(
+            AsrBoostBoundaryWindow(
+                boundary_index=idx,
+                raw_prev_end_ms=raw_prev_end,
+                raw_next_start_ms=raw_next_start,
+                anchor_ms=anchor_ms,
+                search_start_ms=max(speech_start, raw_prev_end - cfg.padding_ms),
+                search_end_ms=min(speech_end, raw_next_start + cfg.padding_ms),
+                padding_ms=cfg.padding_ms,
             )
-            cut_ms = max(window_start, min(window_end, refined))
-        else:
-            cut_ms = clamped_anchor
-
-        cuts.append(cut_ms)
-        cut_audits.append({
-            "boundaryIndex": idx,
-            "rawPrevEndMs": raw_prev_end,
-            "rawNextStartMs": raw_next_start,
-            "anchorMs": anchor_ms,
-            "windowStartMs": window_start,
-            "windowEndMs": window_end,
-            "paddingMs": cfg.padding_ms,
-            "cutMs": cut_ms,
-            "driftMs": cut_ms - anchor_ms,
-        })
-
-    cuts.append(speech_end)
-    aligned = tuple(
-        (cuts[i], cuts[i + 1], sentence_spans[i].text)
-        for i in range(n)
+        )
+    sentences = tuple(
+        AsrBoostSentenceWindow(
+            index=i,
+            text=s.text,
+            raw_start_ms=speech_start if i == 0 else s.start_ms,
+            raw_end_ms=speech_end if i == n - 1 else s.end_ms,
+            window_start_ms=speech_start if i == 0 else boundaries[i - 1].search_start_ms,
+            window_end_ms=speech_end if i == n - 1 else boundaries[i].search_end_ms,
+        )
+        for i, s in enumerate(sentence_spans)
     )
-    return aligned, cut_audits
+    plan = AsrBoostPlan(
+        slice_id=parent.id,
+        backend=cfg.backend,
+        enabled=cfg.enabled,
+        padding_ms=cfg.padding_ms,
+        min_duration_ms=cfg.min_duration_ms,
+        locked_start_ms=speech_start,
+        locked_end_ms=speech_end,
+        sentences=sentences,
+        boundaries=tuple(boundaries),
+        input_spans=sentence_spans,
+    )
+    return calibrate_boost_plan_with_atoms(plan, (), audio_path=audio_path)
+
+
+class AsrBoostPreStage:
+    """Pre-stage that carves sentence intervals and ±padding_ms windows before the sentence aligner."""
+
+    def __init__(
+        self,
+        config: AsrBoostConfig,
+        *,
+        adapter: AsrBoostAdapter | None = None,
+    ) -> None:
+        self.config = config
+        self.adapter = adapter or create_asr_boost_adapter(config.backend)
+
+    def prepare(self, value: DetectStageInput, output_dir: str) -> DetectStageInput:
+        has_boost_data = has_custom_boost_hook(self.adapter.backend) or any(
+            bool(getattr(b, "asr_boost_spans", None))
+            or getattr(b, "asr_boost_config", None) is not None
+            or getattr(b, "asr_boost_plan", None) is not None
+            for b in value.asr_blocks
+        )
+        if not has_boost_data:
+            return value
+        enriched_blocks = []
+        plan_records = []
+        for position, block in enumerate(value.asr_blocks):
+            parent = block.asr_slice or AsrSlice(
+                f"document-asr:{position}:{block.index}",
+                block.start_ms,
+                block.end_ms,
+                block.start_ms,
+                block.end_ms,
+                (f"document-asr:{position}:{block.index}",),
+            )
+            plan = getattr(block, "asr_boost_plan", None) or build_asr_boost_plan(
+                block, parent, self.config, self.adapter
+            )
+            enriched_blocks.append(replace(block, asr_boost_plan=plan))
+            plan_records.append(asdict(plan))
+
+        write_detect_artifact(
+            output_dir,
+            "asr_boost_intervals.json",
+            {
+                "pipeline": "asr-boost",
+                "version": ASR_BOOST_POLICY_VERSION,
+                "config": asdict(self.config),
+                "slices": plan_records,
+            },
+        )
+        return DetectStageInput(tuple(enriched_blocks))
+
+
+class ComposingAsrBoostDetectStage:
+    """Run ASR-boost interval carving first, then pass intervals to the downstream aligner stage."""
+
+    def __init__(self, pre_stage: AsrBoostPreStage, aligner_stage) -> None:
+        self.pre_stage = pre_stage
+        self.aligner_stage = aligner_stage
+
+    def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
+        prepared = self.pre_stage.prepare(value, output_dir)
+        return self.aligner_stage.run(prepared, output_dir)
 
 
 class AsrBoostDetectStage:
-    """Refine coarse ASR blocks using backend/plugin timestamps and padded boundary alignment."""
+    """Standalone ASR-boost stage using coarse VAD outer bounds and padded boundary calibration."""
 
     def __init__(
         self,
@@ -217,6 +526,7 @@ class AsrBoostDetectStage:
 
             source_text = (block.source_text or block.text or "").strip()
             effective_cfg = self.adapter.resolve_config(block, self.config)
+            plan = build_asr_boost_plan(block, parent, self.config, self.adapter)
 
             if block.skip_tts or not source_text or not _lexical(source_text) or not effective_cfg.enabled:
                 reason = (
@@ -250,18 +560,7 @@ class AsrBoostDetectStage:
                 continue
 
             summary["eligibleSlices"] += 1
-            raw_spans = self.adapter.extract_spans(block, parent)
-            if not raw_spans:
-                raw_spans = (
-                    AsrBoostSpan(
-                        start_ms=parent.speech_start_ms,
-                        end_ms=parent.speech_end_ms,
-                        text=source_text,
-                    ),
-                )
-
-            sentence_spans = _group_spans_into_sentences(raw_spans, effective_cfg)
-            if len(sentence_spans) <= 1:
+            if len(plan.sentences) <= 1:
                 summary["exactSlices"] += 1
                 aligned_block = self._build_output_block(
                     block,
@@ -281,15 +580,14 @@ class AsrBoostDetectStage:
                     "outcome": "exact",
                     "reason": "single_sentence",
                     "effectiveConfig": asdict(effective_cfg),
-                    "inputSpans": [asdict(s) for s in raw_spans],
+                    "inputSpans": [asdict(s) for s in plan.input_spans],
                     "outputBlocks": [aligned_block.aligned_sentence],
                 })
                 continue
 
-            aligned_ranges, cut_audits = align_sentence_spans(
-                parent,
-                sentence_spans,
-                effective_cfg,
+            aligned_ranges, cut_audits = calibrate_boost_plan_with_atoms(
+                plan,
+                (),
                 audio_path=self.audio_path,
             )
             if len(aligned_ranges) <= 1:
@@ -312,7 +610,7 @@ class AsrBoostDetectStage:
                     "outcome": "fallback",
                     "reason": "duration_below_minimum",
                     "effectiveConfig": asdict(effective_cfg),
-                    "inputSpans": [asdict(s) for s in raw_spans],
+                    "inputSpans": [asdict(s) for s in plan.input_spans],
                     "outputBlocks": [aligned_block.aligned_sentence],
                 })
                 continue
@@ -338,7 +636,7 @@ class AsrBoostDetectStage:
                 "sliceId": parent.id,
                 "outcome": "aligned",
                 "effectiveConfig": asdict(effective_cfg),
-                "inputSpans": [asdict(s) for s in raw_spans],
+                "inputSpans": [asdict(s) for s in plan.input_spans],
                 "cutAudits": cut_audits,
                 "outputBlocks": created,
             })

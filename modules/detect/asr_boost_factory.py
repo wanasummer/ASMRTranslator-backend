@@ -158,6 +158,11 @@ def asr_boost_supports(backend: str) -> bool:
     return backend in _CUSTOM_BOOST_ADAPTERS or backend in _BUILTIN_BOOST_ADAPTERS
 
 
+def has_custom_boost_hook(backend: str) -> bool:
+    """Return True when a custom ASR-boost hook was explicitly registered for ``backend``."""
+    return backend in _CUSTOM_BOOST_ADAPTERS
+
+
 def create_asr_boost_adapter(backend: str) -> AsrBoostAdapter:
     """Instantiate the ASR-boost adapter for ``backend``."""
     factory = _CUSTOM_BOOST_ADAPTERS.get(backend) or _BUILTIN_BOOST_ADAPTERS.get(backend)
@@ -178,6 +183,17 @@ def asr_boost_cache_signature(config) -> dict:
         "version": ASR_BOOST_POLICY_VERSION,
         "settings": asdict(settings),
     }
+
+
+def create_asr_boost_pre_stage(config):
+    """Create the ASR-boost interval pre-stage when the ASR backend supports it."""
+    from .asr_boost_stage import AsrBoostPreStage
+
+    settings = config.asr_boost_settings()
+    if not asr_boost_supports(settings.backend):
+        return None
+    adapter = create_asr_boost_adapter(settings.backend)
+    return AsrBoostPreStage(settings, adapter=adapter)
 
 
 def create_asr_boost_stage(config, audio_path: str):
