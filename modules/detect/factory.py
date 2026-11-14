@@ -73,8 +73,10 @@ def _joint_cache_signature(config: DetectConfig) -> dict:
 
 
 def _qwen_cache_signature(config: DetectConfig) -> dict:
+    settings = asdict(config.qwen_settings())
+    settings["asr_boost_enabled"] = config.asr_boost_enabled
     return {"pipeline": "qwen-force-align", "version": QWEN_PIPELINE_VERSION,
-            "settings": asdict(config.qwen_settings())}
+            "settings": settings}
 
 
 STAGE_FACTORIES = {

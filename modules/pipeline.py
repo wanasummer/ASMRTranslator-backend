@@ -439,6 +439,7 @@ def run_pipeline(
     vad_threshold: float = 0.5,
     sentence_detector: str = "mecab-japanese",
     detect_enabled: Optional[bool] = None,
+    asr_boost_enabled: bool = True,
     skip_short_translations: bool = True,
     moss_recalibrate: bool = False,
     uvr_enabled: bool = False,
@@ -456,7 +457,8 @@ def run_pipeline(
                                  sentence_detector=sentence_detector,
                                  moss_recalibrate=moss_recalibrate,
                                  moss_endpoint=(asr_kwargs or {}).get("endpoint"),
-                                 asr_backend=asr_backend)
+                                 asr_backend=asr_backend,
+                                 asr_boost_enabled=asr_boost_enabled)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
     detect_enabled = detect_eligible(
         detect_enabled, vtt_path, asr_backend,

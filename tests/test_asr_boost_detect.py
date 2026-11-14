@@ -327,6 +327,14 @@ class AsrBoostDetectTests(unittest.TestCase):
         self.assertEqual(qwen_res.blocks[1].start_ms, 2020)
         self.assertEqual(qwen_res.blocks[1].end_ms, 4000)
 
+        # 3. Disabling asr_boost_enabled turns off the pre-stage and invalidates detect cache signatures
+        disabled_joint = replace(joint_cfg, asr_boost_enabled=False)
+        disabled_qwen = replace(qwen_cfg, asr_boost_enabled=False)
+        self.assertIsNone(create_detect_stage(disabled_joint, "missing.wav").asr_boost)
+        self.assertIsNone(create_detect_stage(disabled_qwen, "missing.wav").asr_boost)
+        self.assertNotEqual(detect_cache_signature(joint_cfg), detect_cache_signature(disabled_joint))
+        self.assertNotEqual(detect_cache_signature(qwen_cfg), detect_cache_signature(disabled_qwen))
+
 
 if __name__ == "__main__":
     unittest.main()

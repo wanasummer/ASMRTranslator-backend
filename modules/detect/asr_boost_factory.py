@@ -186,11 +186,11 @@ def asr_boost_cache_signature(config) -> dict:
 
 
 def create_asr_boost_pre_stage(config):
-    """Create the ASR-boost interval pre-stage when the ASR backend supports it."""
+    """Create the ASR-boost interval pre-stage when enabled and supported by the ASR backend."""
     from .asr_boost_stage import AsrBoostPreStage
 
     settings = config.asr_boost_settings()
-    if not asr_boost_supports(settings.backend):
+    if not settings.enabled or not asr_boost_supports(settings.backend):
         return None
     adapter = create_asr_boost_adapter(settings.backend)
     return AsrBoostPreStage(settings, adapter=adapter)

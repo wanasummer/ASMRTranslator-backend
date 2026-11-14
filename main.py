@@ -261,6 +261,8 @@ Examples:
     parser.add_argument("--detect-stage", "--vad-sentence-realignment-beta",
                         dest="detect_stage", action="store_true",
                         help="Enable Japanese sentence detection after ASR and before cleanup")
+    parser.add_argument("--no-asr-boost", action="store_true",
+                        help="Disable ASR Boost word-timestamp interval pre-stage before sentence alignment")
     parser.add_argument("--sentence-aligner", type=str, default="joint-vad",
                         choices=["joint-vad", "qwen-force-align", "moss-native", "asr-boost"],
                         help="Detect-stage pipeline (default: joint-vad; MOSS ASR requires moss-native)")
@@ -671,6 +673,7 @@ Examples:
         non_japanese_filter_enabled=not args.no_non_japanese_filter,
         vad_enabled=not args.no_vad,
         detect_enabled=args.detect_stage,
+        asr_boost_enabled=not args.no_asr_boost,
         sentence_aligner=args.sentence_aligner,
         qwen_align_endpoint=args.qwen_align_endpoint,
         uvr_enabled=args.uvr_enabled,

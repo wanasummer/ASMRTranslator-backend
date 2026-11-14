@@ -191,6 +191,7 @@ class DetectConfig:
     moss: MossDetectConfig | None = None
     asr_boost: AsrBoostConfig | None = None
     asr_backend: str = "fish-asr"
+    asr_boost_enabled: bool = True
     asr_boost_padding_ms: int = 250
     moss_recalibrate: bool = False
     moss_endpoint: str | None = None
@@ -199,6 +200,7 @@ class DetectConfig:
         if self.asr_boost is not None:
             return self.asr_boost
         return AsrBoostConfig(
+            enabled=self.asr_boost_enabled,
             padding_ms=self.asr_boost_padding_ms,
             min_duration_ms=self.min_sentence_duration_ms,
             backend=self.asr_backend,
