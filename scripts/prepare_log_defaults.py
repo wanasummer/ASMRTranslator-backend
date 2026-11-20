@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -9,7 +10,6 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from modules.io import write_json
 
 
 def prepare_log_defaults(output: Path, environ: Mapping[str, str]) -> Path:
@@ -30,7 +30,8 @@ def prepare_log_defaults(output: Path, environ: Mapping[str, str]) -> Path:
     disabled = environ.get("ASMR_DISABLE_LOG_UPLOAD", "").strip().lower() in {"1", "true", "yes"}
     if required and (not endpoint or disabled):
         raise ValueError("Release build requires an enabled log upload endpoint")
-    write_json(str(output), values)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
     return output
 
 

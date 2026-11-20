@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from modules.error import PipelineError, TTSError, descriptor, safe_detail, unexpected_error
+from modules.error import PipelineError, TTSError, descriptor, file_in_use_error, safe_detail, unexpected_error
 
 
 class PipelineErrorContractTest(unittest.TestCase):
@@ -53,6 +53,20 @@ class PipelineErrorContractTest(unittest.TestCase):
         self.assertNotIn("client-secret", value)
         self.assertNotIn("signature-secret", value)
         self.assertIn("Sec-MS-GEC-Version=1-143.0.3650.75", value)
+    def test_file_in_use_is_found_in_cause_chain(self):
+        replace = PermissionError(13, "denied", "staged.wav", 5, "output.wav")
+        try:
+            try:
+                raise replace
+            except PermissionError as error:
+                raise RuntimeError("could not persist") from error
+        except RuntimeError as wrapped:
+            self.assertIs(file_in_use_error(wrapped), replace)
+        sharing = OSError(13, "in use", "output.wav", 32)
+        self.assertIs(file_in_use_error(sharing), sharing)
+        self.assertIsNone(file_in_use_error(PermissionError(13, "denied", "output.wav")))
+        self.assertIsNone(file_in_use_error(RuntimeError("boom")))
+        self.assertEqual(descriptor("OUTPUT_FILE_IN_USE").action, "retry")
 
 
 if __name__ == "__main__":

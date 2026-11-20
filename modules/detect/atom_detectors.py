@@ -2,10 +2,11 @@
 
 from .contracts import DetectError, SpeechAtomDetector
 from ..vad.contracts import VadRegion
+from ..vad.asmr_policy import ASMRVadPolicy, DEFAULT_ASMR_VAD_POLICY
 
 
 class NativeVadAtomDetector:
-    def __init__(self, audio_path: str, *, loader=None, native_factory=None):
+    def __init__(self, audio_path: str, config=None, *, loader=None, native_factory=None):
         self.audio_path = audio_path
         self.loader = loader
         self.native_factory = native_factory
@@ -34,11 +35,45 @@ class NativeVadAtomDetector:
             raise DetectError("DETECT_ALIGNMENT_FAILED", "Native VAD atom detection failed") from exc
 
 
-ATOM_DETECTORS = {"native-vad": NativeVadAtomDetector}
+class ASMRVadAtomDetector:
+    def __init__(self, audio_path: str, config=None, *, client=None,
+                 policy: ASMRVadPolicy = DEFAULT_ASMR_VAD_POLICY):
+        from ..vad.plugin import ASMRPluginVAD
+        from .contracts import DetectConfig
+        config = config if config is not None else DetectConfig()
+        self.audio_path = audio_path
+        self.engine = ASMRPluginVAD({"threshold": config.vad_threshold, "purpose": "detect"},
+                                    client=client, policy=policy)
+
+    def detect(self, parent, threshold_ms):
+        start, end = parent.speech_start_ms, parent.speech_end_ms
+        # Fine ASMR segmentation owns its silence policy, independent of FSMN.
+        try:
+            regions = self.engine.detect_sync(self.audio_path, start_ms=start, end_ms=end)
+        except Exception as error:
+            raise DetectError("DETECT_ALIGNMENT_FAILED", "ASMR VAD atom detection failed") from error
+        return tuple(VadRegion(f"{parent.id}-asmr-atom-{index}", start + round(row.start * 1000),
+                              start + round(row.end * 1000), "detect-stage",
+                              self.engine.config["max_end_silence_time"])
+                     for index, row in enumerate(regions))
 
 
-def create_atom_detector(name: str, audio_path: str) -> SpeechAtomDetector:
+ATOM_DETECTORS = {"native-vad": NativeVadAtomDetector, "asmr-vad": ASMRVadAtomDetector}
+
+ATOM_BACKENDS = {"fsmn-vad": "native-vad", "asmr-vad": "asmr-vad"}
+
+
+def atom_detector_for_backend(backend: str) -> str:
+    """Use the selected voice detector in the joint-detect stage as well."""
     try:
-        return ATOM_DETECTORS[name](audio_path)
+        return ATOM_BACKENDS[backend]
+    except KeyError as error:
+        raise DetectError("DETECT_IMPLEMENTATION_UNKNOWN", f"Unknown VAD backend: {backend}") from error
+
+
+def create_atom_detector(name: str, audio_path: str, config=None) -> SpeechAtomDetector:
+    try:
+        factory = ATOM_DETECTORS[name]
     except KeyError as exc:
         raise DetectError("DETECT_IMPLEMENTATION_UNKNOWN", f"Unknown atom detector: {name}") from exc
+    return factory(audio_path, config)

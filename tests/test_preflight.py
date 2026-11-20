@@ -149,7 +149,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
             "ttsBackend": "fish-audio",
             "fishModel": "s2.1-pro-free",
         }
-        with patch("modules.preflight.LLMClient") as client_type:
+        with patch("modules.preflight.LLMRuntime") as client_type:
             client_type.return_value.check_connection = AsyncMock(return_value="好")
             await preflight._check_llm(config)
 
@@ -165,7 +165,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
                 error = LLMError(f"openai LLM returned {status}")
                 error.context["status"] = status
-                with patch("modules.preflight.LLMClient") as client_type:
+                with patch("modules.preflight.LLMRuntime") as client_type:
                     client_type.return_value.check_connection = AsyncMock(side_effect=error)
                     with self.assertRaisesRegex(preflight.PreflightError, expected):
                         await preflight._check_llm(config)

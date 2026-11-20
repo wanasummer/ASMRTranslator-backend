@@ -8,7 +8,7 @@ __all__ = ["ErrorDescriptor", "PipelineError", "ConfigurationError", "ProjectErr
     "VadError", "AsrError", "LlmError", "TtsError", "AudioProcessingError",
     "ExportError", "ASRError", "TTSError", "_RetryableTTSError", "LLMError",
     "VADUnavailableError", "descriptor", "safe_detail", "unexpected_error",
-    "is_memory_allocation_error"]
+    "is_memory_allocation_error", "file_in_use_error"]
 
 @dataclass(frozen=True)
 class ErrorDescriptor:
@@ -78,6 +78,7 @@ _ERRORS = {
     "AUDIO_METADATA_FAILED": ("audio.metadata", "原音频标签或封面复制失败，请查看日志后重试。", "view_log", True),
     "SUBTITLE_FINAL_EMPTY": ("subtitle.export", "最终没有可导出的中文字幕。", "view_log", False),
     "OUTPUT_WRITE_DENIED": ("output", "无法写入项目目录，请检查权限。", "open_project", False),
+    "OUTPUT_FILE_IN_USE": ("output", "输出文件正被其他程序占用（如播放器、资源管理器预览、杀毒软件或网盘同步），请关闭占用程序后重试。", "retry", True),
     "OUTPUT_DISK_FULL": ("output", "磁盘空间不足，无法完成生成。", "open_project", True),
     "QUEUE_TASK_DUPLICATE": ("queue", "该音频已在等待或转换中。", "open_tasks", False),
     "QUEUE_PROCESS_START_FAILED": ("queue", "无法启动转换引擎，请重新安装或联系管理员。", "contact_admin", True),
@@ -114,6 +115,32 @@ def is_memory_allocation_error(value: str) -> bool:
     return any(term in lower for term in (
         "bad_alloc", "bad allocation", "out of memory", "out_of_memory",
         "memoryerror", "内存不足", "内存分配失败"))
+
+
+# ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION always mean another handle.
+_FILE_IN_USE_WINERRORS = frozenset({32, 33})
+
+
+def file_in_use_error(error: BaseException) -> OSError | None:
+    """Return the OS error in ``error``'s cause chain caused by a locked file.
+
+    Windows reports ``ERROR_ACCESS_DENIED`` (5) instead of a sharing violation
+    when replacing/renaming onto a file another process holds open without
+    delete sharing (players, Explorer previews, antivirus, sync clients). A
+    two-path ``PermissionError`` is therefore treated as in-use as well.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            winerror = getattr(current, "winerror", None)
+            if winerror in _FILE_IN_USE_WINERRORS:
+                return current
+            if isinstance(current, PermissionError) and current.filename2 is not None:
+                return current
+        current = current.__cause__ or current.__context__
+    return None
 
 class PipelineError(Exception):
     def __init__(self, error: ErrorDescriptor, *, detail: str = "", cause: Exception | None = None,

@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from ..vad.contracts import AsrSlice, VadRegion
+from .asr_boost_config import AsrBoostConfig
+from .qwen_config import QwenConfig
+from .moss_config import MossDetectConfig
 
 
 class DetectError(RuntimeError):
@@ -80,6 +83,7 @@ class AlignmentRequest:
     source_block_id: str
     detection: SentenceDetection
     bypass_reason: str | None = None
+    asr_boost_plan: object | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,8 @@ class AlignedSentenceBlock:
     method: str
     confidence: str
     sentence_type: str = "unknown"
+    source_start_ms: int | None = None
+    source_end_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,8 +161,13 @@ class AlignmentDependencies:
 
 @dataclass(frozen=True)
 class DetectConfig:
+    """Stage selection plus legacy FSMN settings; Qwen and MOSS own their policies."""
+
     sentence_detector: str = "mecab-japanese"
     aligner: str = "joint-vad"
+    qwen_endpoint: str = "http://127.0.0.1:8007"
+    vad_endpoint: str = "http://127.0.0.1:8006"
+    vad_threshold: float = 0.5
     atom_detector: str = "native-vad"
     duration_estimator: str = "japanese-mora"
     region_partitioner: str = "joint-dynamic-programming"
@@ -176,6 +187,35 @@ class DetectConfig:
     vocalization_chars: str = "嗯啊阿哈哦喔呃唔呀哼欸诶あぁうぅんはぁえぇおぉっッー"
     vocalization_ratio: float = 0.72
     vocalization_run: int = 5
+    qwen: QwenConfig | None = None
+    moss: MossDetectConfig | None = None
+    asr_boost: AsrBoostConfig | None = None
+    asr_backend: str = "fish-asr"
+    asr_boost_enabled: bool = True
+    asr_boost_padding_ms: int = 250
+    moss_recalibrate: bool = False
+    moss_endpoint: str | None = None
+
+    def asr_boost_settings(self) -> AsrBoostConfig:
+        if self.asr_boost is not None:
+            return self.asr_boost
+        return AsrBoostConfig(
+            enabled=self.asr_boost_enabled,
+            padding_ms=self.asr_boost_padding_ms,
+            min_duration_ms=self.min_sentence_duration_ms,
+            backend=self.asr_backend,
+        )
+
+    def moss_settings(self) -> MossDetectConfig:
+        return self.moss or MossDetectConfig(
+            min_sentence_duration_ms=self.min_sentence_duration_ms,
+            recalibrate=self.moss_recalibrate,
+            recalibrate_endpoint=self.moss_endpoint,
+        )
+
+    def qwen_settings(self) -> QwenConfig:
+        """Adapt the legacy endpoint only; never inherit FSMN scoring knobs."""
+        return self.qwen or QwenConfig(endpoint=self.qwen_endpoint)
 
     def __post_init__(self):
         positive = (
@@ -208,6 +248,11 @@ class DetectConfig:
 
 @dataclass(frozen=True)
 class DetectStageInput:
+    """ASR blocks, copied on output; absent slice lineage uses authored ranges.
+
+    Document ASR speaker turns may overlap and retain their source ordering.
+    """
+
     asr_blocks: tuple[AsrBlock, ...]
 
 

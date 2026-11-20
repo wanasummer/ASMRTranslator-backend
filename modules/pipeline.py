@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .io import intermediate_dir, open_log, write_json, write_text
+from .io import intermediate_dir
+from .storage import DatabaseLog, save_json, save_text
+from .storage import address, contains, read_text, document_digest, delete_document
 from .pipeline_logger import PipelineTee, print_progress
 from .vtt_parser import parse_vtt
 from .audio_splitter import get_audio_duration, split_audio
@@ -29,25 +31,34 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     """Rebuild the edited studio timeline from an immutable task snapshot."""
     from contextlib import redirect_stdout
     from uuid import uuid4
-    from .arrangement import prepare_arrangement_plan
-    from .arrangement_audio import create_arrangement_audio_adapter, write_arrangement_result
+    from .arrangement import (ArrangementError, adopt_rendered_takes, create_arrangement_audio_adapter,
+                              prepare_arrangement_plan, publish_subtitle_base, write_arrangement_result)
     work = Path(payload["workDir"])
     output = work / "arrangement/runs" / uuid4().hex
-    log_path = output / "arrangement.log"
-    with open_log(str(log_path)) as log:
+    log_path = address(output / "arrangement.log").reference
+    with DatabaseLog(str(log_path)) as log:
         with redirect_stdout(PipelineTee(sys.stdout, log)):
             print("[arrangement] 开始编排任务，使用已保存配置快照")
-            _required_stage("OUTPUT_WRITE_DENIED", write_json, str(output / "input.json"), payload["state"])
+            _required_stage("OUTPUT_WRITE_DENIED", save_json, str(output / "input.json"), payload["state"])
             print_progress("prepare", "读取编排配置与缓存", 0, 1)
             plan = _required_stage("AUDIO_DSP_FAILED", prepare_arrangement_plan,
                                    work, Path(payload["audioPath"]), payload["state"],
-                                   payload["config"], payload["ttsKwargs"])
+                                   payload["config"], payload["ttsKwargs"], payload.get("ttsOverrides"))
             print_progress("building", "处理编排片段", 0, 1)
-            result = _required_stage("AUDIO_DSP_FAILED", create_arrangement_audio_adapter().render, plan)
+            result = _required_stage("AUDIO_DSP_FAILED", create_arrangement_audio_adapter(plan.listen_mode).render, plan)
             print_progress("concat", "重新拼接并导出", 0, 1)
             files = _required_stage("OUTPUT_WRITE_DENIED", write_arrangement_result, result, output, payload["state"])
             print(f"[arrangement] 重新编排完成：{files['output_mp3']}")
+            try:
+                adopted = adopt_rendered_takes(work, plan.takes)
+                print(f"[arrangement] 新生成 TTS {len(plan.takes)} 段，回写编排草稿 {adopted} 段")
+            except ArrangementError as error:
+                # The export is complete; without adoption the studio keeps the previous audio for these fragments.
+                print(f"[arrangement] 新生成的 TTS 未回写编排草稿：{error}")
             print_progress("concat", "编排完成", 1, 1)
+    from .run_results import record_arrangement_run
+    _required_stage("OUTPUT_WRITE_DENIED", record_arrangement_run, work, output, payload["state"], files)
+    _required_stage("OUTPUT_WRITE_DENIED", publish_subtitle_base, work, payload["state"])
     return {**files, "log_path": str(log_path)}
 
 
@@ -57,43 +68,66 @@ def _required_stage(code: str, operation, *args, **kwargs):
         return operation(*args, **kwargs)
     except PipelineError:
         raise
-    except PermissionError as error:
-        from .error import ExportError, descriptor
-        raise ExportError(descriptor("OUTPUT_WRITE_DENIED"), detail=str(error), cause=error) from error
-    except OSError as error:
-        from .error import AudioProcessingError, descriptor
-        disk_full = getattr(error, "errno", None) == 28 or getattr(error, "winerror", None) == 112
-        mapped = "OUTPUT_DISK_FULL" if disk_full else code
-        raise AudioProcessingError(descriptor(mapped), detail=str(error), cause=error) from error
     except Exception as error:
-        from .error import AudioProcessingError, descriptor
+        from .error import AudioProcessingError, ExportError, descriptor, file_in_use_error
+        locked = file_in_use_error(error)
+        if locked is not None:
+            path = locked.filename2 if locked.filename2 is not None else locked.filename
+            raise ExportError(descriptor("OUTPUT_FILE_IN_USE"), detail=str(locked), cause=error,
+                              context={"path": str(path)} if path is not None else None) from error
+        if isinstance(error, PermissionError):
+            raise ExportError(descriptor("OUTPUT_WRITE_DENIED"), detail=str(error), cause=error) from error
+        if isinstance(error, OSError):
+            disk_full = getattr(error, "errno", None) == 28 or getattr(error, "winerror", None) == 112
+            mapped = "OUTPUT_DISK_FULL" if disk_full else code
+            raise AudioProcessingError(descriptor(mapped), detail=str(error), cause=error) from error
         raise AudioProcessingError(descriptor(code), detail=str(error), cause=error) from error
 
 
 def _clean_previous_run(output_dir: str) -> int:
-    """Remove final outputs while preserving resumable stage artifacts.
-
-    Intermediate ASR, split, TTS, and audio-build directories intentionally
-    survive a retry. Their current cache keys are positional; invalidation for
-    changed source audio or synthesis settings is deferred until the cache
-    contract carries content/configuration fingerprints.
-
-    Returns the number of removed entries (0 when the directory was already clean).
-    """
+    """Invalidate published documents and audio, preserving content-addressed caches."""
+    for name in ("debug/_parsed_vtt.json", "llm_subtitles/final.vtt", "debug/high_quality_export.json"):
+        delete_document(Path(output_dir) / name)
+    tts_dir = Path(output_dir) / "chunk_0/02_tts"
+    target = address(tts_dir / "tts_tempo_")
+    for key in target.store.keys(target.scope, target.key):
+        target.store.delete(target.scope, key)
     removed = 0
-    stale_files = ["_parsed_vtt.json", "output.wav", "output.mp3", "llm_subtitles/final.vtt",
-                   "debug/high_quality_export.json"]
-    stale_files.extend(
-        entry for entry in os.listdir(output_dir)
-        if re.fullmatch(r"pipeline_\d{8}_\d{6}\.log", entry)
-    )
-    for stale in stale_files:
-        try:
-            os.remove(os.path.join(output_dir, stale))
+    for path in [Path(output_dir) / "output.wav", Path(output_dir) / "output.mp3",
+                 *tts_dir.glob("voice_*.wav")]:
+        if path.is_file():
+            path.unlink()
             removed += 1
-        except OSError:
-            pass
     return removed
+
+
+def _serialize_parsed_vtt_block(block) -> dict:
+    from .tts.references import parent_span
+    parent_id, parent_start, parent_end = parent_span(block)
+    row = {
+        "source_block_id": parent_id, "source_start_ms": parent_start, "source_end_ms": parent_end,
+        "index": block.index,
+        "start_ms": block.start_ms,
+        "end_ms": block.end_ms,
+        "speaker": block.speaker,
+        "text": block.text,
+        "source_text": getattr(block, "source_text", ""),
+        "skip_tts": getattr(block, "skip_tts", False),
+    }
+    if getattr(block, "asr_slice", None) is not None:
+        from dataclasses import asdict
+        row["asr_slice"] = asdict(block.asr_slice)
+    aligned = getattr(block, "aligned_sentence", None)
+    source_block_id = getattr(aligned, "source_block_id", None)
+    if source_block_id:
+        row["source_block_id"] = str(source_block_id)
+        source_start_ms = getattr(aligned, "source_start_ms", None)
+        source_end_ms = getattr(aligned, "source_end_ms", None)
+        if source_start_ms is not None:
+            row["source_start_ms"] = int(source_start_ms)
+        if source_end_ms is not None:
+            row["source_end_ms"] = int(source_end_ms)
+    return row
 
 
 def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None = None) -> tuple[list, str, str] | None:
@@ -101,39 +135,85 @@ def _load_cached_asr(output_dir: str, asr_kwargs: dict, expected_key: str | None
 
     Japanese ASR resumes from the cleaned artifact because sentence detection
     and Japanese cleanup have already completed. Chinese ASR resumes from the
-    raw artifact because it is already the final ASR-stage contract.
+    raw artifact because it is already the final ASR-stage contract. Document
+    adapters owning that boundary record their selected artifact explicitly.
     """
     configured = str(
         asr_kwargs.get("output_language", asr_kwargs.get("language", "ja"))
     ).strip().lower()
     language = "zh" if configured.startswith("zh") else "ja"
-    filename = "raw.vtt" if language == "zh" else "cleaned.vtt"
-    path = os.path.join(output_dir, "asr_subtitles", filename)
-    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
-        return None
+    record = None
     if expected_key:
-        from .task_cache import JsonResultCache, file_digest
-        record = JsonResultCache(os.path.join(output_dir, "asr_stage_results")).load(expected_key)
-        if not record or record.get("sha256") != file_digest(path):
+        from .task_cache import SqliteResultCache
+        record = SqliteResultCache(output_dir, "asr_stage_results").load(expected_key)
+        if not record:
             return None
+    filename = "raw.vtt" if language == "zh" else "cleaned.vtt"
+    if record:
+        filename = record.get("artifact_filename", filename)
+    if filename not in {"raw.vtt", "cleaned.vtt", "detected.vtt"}:
+        return None
+    path = os.path.join(output_dir, "asr_subtitles", filename)
+    if not contains(path) or (record and record.get("sha256") != document_digest(path)):
+        return None
     try:
-        blocks = parse_vtt(path)
+        from .subtitles.vtt_adapter import VTTAdapter
+        from .vtt_parser import VTTBlock
+        blocks = [VTTBlock.from_subtitle_block(block) for block in VTTAdapter().parse_text(read_text(path)).blocks]
     except (OSError, ValueError):
         return None
     if not blocks:
         return None
+    lineage = record.get("block_lineage") if isinstance(record, dict) else None
+    if isinstance(lineage, list) and len(lineage) == len(blocks):
+        from .detect.contracts import AlignedSentenceBlock
+        for block, meta in zip(blocks, lineage):
+            if not isinstance(meta, dict):
+                continue
+            if isinstance(meta.get("source_text"), str) and meta["source_text"]:
+                block.source_text = meta["source_text"]
+            if isinstance(meta.get("skip_tts"), bool):
+                block.skip_tts = meta["skip_tts"]
+            if isinstance(meta.get("asr_slice"), dict):
+                from .vad.contracts import AsrSlice
+                try:
+                    value = dict(meta["asr_slice"])
+                    value["region_ids"] = tuple(value.get("region_ids", ()))
+                    block.asr_slice = AsrSlice(**value)
+                except (TypeError, ValueError):
+                    return None
+            source_block_id = meta.get("source_block_id")
+            if isinstance(source_block_id, str) and source_block_id:
+                block.aligned_sentence = AlignedSentenceBlock(
+                    f"{source_block_id}-sentence-{block.index}",
+                    source_block_id,
+                    block.start_ms,
+                    block.end_ms,
+                    block.source_text or block.text,
+                    (source_block_id,),
+                    "cached-asr",
+                    "medium",
+                    "unknown",
+                    meta.get("source_start_ms"),
+                    meta.get("source_end_ms"),
+                )
     return blocks, language, path
 
 
-def _create_japanese_cleaner_with_fallback(name: str):
-    """Create the configured cleaner; configured implementations are required."""
-    from .japanese_cleaning import (
+def _create_japanese_cleaner_with_fallback(name: str, *, enabled: bool = True):
+    """Create the configured Japanese cleaning capability; configured implementations are required."""
+    from . import cleaning
+    from .cleaning import (
+        JapaneseCleanCapability,
+        JapaneseCleanConfig,
         JapaneseCleanerUnavailableError,
-        create_japanese_cleaner,
     )
 
     try:
-        return create_japanese_cleaner(name)
+        return JapaneseCleanCapability(
+            JapaneseCleanConfig(enabled=enabled, cleaner=name),
+            cleaner_factory=cleaning.create_japanese_cleaner,
+        )
     except JapaneseCleanerUnavailableError as error:
         from .error import ConfigurationError, descriptor
         raise ConfigurationError(
@@ -141,6 +221,12 @@ def _create_japanese_cleaner_with_fallback(name: str):
             detail=f"Japanese cleaner {name} unavailable: {error}", cause=error,
             context={"backend": name},
         ) from error
+
+
+def _non_japanese_filter_policy() -> str:
+    from .cleaning.capabilities.capNonJapaneseFilter import POLICY_VERSION
+
+    return POLICY_VERSION
 
 
 def _format_vtt_timestamp(ms: int) -> str:
@@ -153,19 +239,20 @@ def _format_vtt_timestamp(ms: int) -> str:
 
 
 def _write_optimized_subtitles(output_dir: str, blocks) -> str:
-    """Write the (LLM-optimized) blocks as a standalone WebVTT file.
+    """Persist an optimized WebVTT document for inspection.
 
-    The file lands under ``output_dir/llm_subtitles/optimized.vtt`` so it never
-    collides with the pipeline's own artifacts. Speaker prefixes and any English
+    The logical key ``llm_subtitles/optimized.vtt`` is scoped to this asset. Speaker prefixes and any English
     emotion tags inside ``block.text`` are preserved as-is (tags are only
     stripped at TTS synthesis time, not here). Blocks flagged ``skip_tts``
     (interjection fragments whose translation TTS is skipped) get the marker
     ``【已跳过翻译】`` appended so they are identifiable at a glance.
 
-    Returns the absolute path of the written file.
+    Returns a SQLite document reference.
     """
+    from .storage import initialize_project
+    initialize_project(output_dir)
     path = os.path.join(
-        intermediate_dir(output_dir, "llm_subtitles"), "optimized.vtt"
+        os.path.join(output_dir, "llm_subtitles"), "optimized.vtt"
     )
     lines = ["WEBVTT", ""]
     for b in blocks:
@@ -180,18 +267,19 @@ def _write_optimized_subtitles(output_dir: str, blocks) -> str:
             text = f"{text}【已跳过翻译】"
         lines.append(text)
         lines.append("")
-    write_text(path, "\n".join(lines))
-    return path
+    return save_text(path, "\n".join(lines))
 
 
-def _write_asr_subtitles(output_dir: str, blocks) -> str:
-    """Write the raw ASR-generated blocks as a standalone WebVTT file.
+def _write_asr_subtitles(output_dir: str, blocks, filename: str = "raw.vtt") -> str:
+    """Persist ASR or detected blocks as an inspectable WebVTT document.
 
-    Lands under ``output_dir/asr_subtitles/raw.vtt``. Unlike the
-    optimized export there is no speaker prefix — ASR output has no speaker info.
+    Uses the asset-scoped logical key ``asr_subtitles/raw.vtt``. Native speaker labels
+    are retained as prefixes so exports and cache reloads keep diarization.
     """
+    from .storage import initialize_project
+    initialize_project(output_dir)
     path = os.path.join(
-        intermediate_dir(output_dir, "asr_subtitles"), "raw.vtt"
+        os.path.join(output_dir, "asr_subtitles"), filename
     )
     lines = ["WEBVTT", ""]
     for b in blocks:
@@ -199,10 +287,9 @@ def _write_asr_subtitles(output_dir: str, blocks) -> str:
         lines.append(
             f"{_format_vtt_timestamp(b.start_ms)} --> {_format_vtt_timestamp(b.end_ms)}"
         )
-        lines.append(b.text or "")
+        lines.append(f"{b.speaker}：{b.text or ''}" if b.speaker else b.text or "")
         lines.append("")
-    write_text(path, "\n".join(lines))
-    return path
+    return save_text(path, "\n".join(lines))
 
 
 def _serialize(regions):
@@ -219,16 +306,18 @@ def write_vad_output(output_dir: str, raw_regions, final_slices, cfg: dict) -> s
     failed ASR run can be inspected without re-running the detector. Returns
     the ``vad_output`` directory path that was written.
     """
-    dir_path = intermediate_dir(output_dir, "vad_output")
-    write_json(
+    from .storage import initialize_project
+    initialize_project(output_dir)
+    dir_path = os.path.join(output_dir, "vad_output")
+    save_json(
         os.path.join(dir_path, "raw_regions.json"),
         {"count": len(raw_regions), "regions": _serialize(raw_regions)},
     )
-    write_json(
+    save_json(
         os.path.join(dir_path, "final_slices.json"),
         {"count": len(final_slices), "slices": _serialize(final_slices)},
     )
-    write_json(
+    save_json(
         os.path.join(dir_path, "config.json"),
         {"vad_config": cfg},
     )
@@ -236,33 +325,22 @@ def write_vad_output(output_dir: str, raw_regions, final_slices, cfg: dict) -> s
     return dir_path
 
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-
-
 def count_cjk_chars(text: str) -> int:
-    """Count Chinese characters in ``text`` (CJK Unified Ideographs only).
+    """Count Chinese characters in ``text`` (delegates to capInterjectionSkip)."""
+    from .cleaning.capabilities.capInterjectionSkip import (
+        count_cjk_chars as _count_cjk_chars,
+    )
 
-    Punctuation, whitespace, kana, Latin and digits are all excluded, so the
-    result is exactly "the number of Chinese characters after removing
-    punctuation" — the rule used to detect interjection fragments.
-    """
-    return len(_CJK_RE.findall(text or ""))
+    return _count_cjk_chars(text)
 
 
-def mark_interjection_skips(blocks, max_chars: int = 3) -> int:
-    """Flag blocks whose translated text is too short to dub.
+def mark_interjection_skips(blocks, max_chars: int = 3, *, enabled: bool = True) -> int:
+    """Flag blocks whose translated text is too short to dub (delegates to capInterjectionSkip)."""
+    from .cleaning import InterjectionSkipCapability, InterjectionSkipConfig
 
-    A block whose text holds ≤ ``max_chars`` Chinese characters (after removing
-    punctuation) is mostly a 语气词/短叹 (e.g. "嗯", "啊，呀！") — set
-    ``block.skip_tts = True`` so the pipeline skips its translation TTS and keeps
-    the original audio for that span. Returns the number of blocks flagged.
-    """
-    flagged = 0
-    for b in blocks:
-        if not b.skip_tts and count_cjk_chars(b.text) <= max_chars:
-            b.skip_tts = True
-            flagged += 1
-    return flagged
+    return InterjectionSkipCapability(
+        InterjectionSkipConfig(enabled=enabled, max_chars=max_chars)
+    ).mark_in_place(blocks)
 
 
 # Keys of the run_pipeline vad_* parameters forwarded to optimize_asmr_segments.
@@ -280,8 +358,8 @@ def _vad_optimize_kwargs(vad_cfg: dict) -> dict:
 def _run_vad_stage(audio_path: str, vad_cfg: dict, output_dir: str) -> list:
     """Detect speech regions, optimize them into ASR slices, and persist artifacts.
 
-    Runs FSMN-VAD on the audio, merges short fragments into ASR-sized slices
-    (the 1500ms split / 25s cap come from run_pipeline's vad_* parameters), and
+    Runs the selected VAD adapter, merges fragments into ASR-sized slices using
+    its resolved policy (FSMN defaults or ASMR's own splitting parameters), and
     writes the raw regions + final slices under ``output_dir/vad_output/``.
     Returns the final slices. An unavailable/disabled VAD aborts the no-subtitle
     path (报错终止).
@@ -289,6 +367,8 @@ def _run_vad_stage(audio_path: str, vad_cfg: dict, output_dir: str) -> list:
     from .error import ASRError
     from .vad import create_vad, optimize_asmr_segments
 
+    from .vad.factory import resolve_vad_config
+    vad_cfg = resolve_vad_config(vad_cfg)
     vad_engine = create_vad(vad_cfg)
     if not vad_engine.available:
         reason = getattr(vad_engine, "reason", "未知原因")
@@ -342,6 +422,8 @@ def run_pipeline(
     asr_backend: str = "fish-asr",
     asr_max_concurrent: int = 3,
     japanese_cleaner: str = "mecab-regex",
+    japanese_clean_enabled: bool = True,
+    non_japanese_filter_enabled: bool = True,
     vad_enabled: bool = True,
     vad_max_end_silence_time: int = 1500,
     vad_max_single_segment_time: int = 25000,
@@ -354,22 +436,53 @@ def run_pipeline(
     vad_split_overlap_sec: float = 4.0,
     vad_sentence_realignment_beta: bool = False,
     sentence_aligner: str = "joint-vad",
+    qwen_align_endpoint: str = "http://127.0.0.1:8007",
+    vad_backend: str = "fsmn-vad",
+    vad_endpoint: str = "http://127.0.0.1:8006",
+    vad_threshold: float = 0.5,
     sentence_detector: str = "mecab-japanese",
     detect_enabled: Optional[bool] = None,
+    asr_boost_enabled: bool = True,
+    skip_short_translations: bool = True,
+    moss_recalibrate: bool = False,
+    uvr_enabled: bool = False,
+    uvr_endpoint: str = "http://127.0.0.1:8008",
 ) -> dict:
-    from .detect import DetectConfig, create_detect_stage, detect_eligible
+    from .detect import DetectConfig, create_detect_stage, detect_eligible, detect_cache_signature, validate_detect_selection
     from .vad.stage import run_analysis_stage
-    detect_config = DetectConfig(aligner=sentence_aligner,
-                                 sentence_detector=sentence_detector)
+    from .vad.factory import resolve_vad_config
+    from .detect.atom_detectors import atom_detector_for_backend
+    if not 0 < vad_threshold < 1:
+        raise ValueError("VAD threshold must be between 0 and 1")
+    detect_config = DetectConfig(aligner=sentence_aligner, qwen_endpoint=qwen_align_endpoint,
+                                 atom_detector=atom_detector_for_backend(vad_backend),
+                                 vad_endpoint=vad_endpoint, vad_threshold=vad_threshold,
+                                 sentence_detector=sentence_detector,
+                                 moss_recalibrate=moss_recalibrate,
+                                 moss_endpoint=(asr_kwargs or {}).get("endpoint"),
+                                 asr_backend=asr_backend,
+                                 asr_boost_enabled=asr_boost_enabled)
     detect_enabled = vad_sentence_realignment_beta if detect_enabled is None else detect_enabled
+    detect_enabled = detect_eligible(
+        detect_enabled, vtt_path, asr_backend,
+        (asr_kwargs or {}).get("output_language", (asr_kwargs or {}).get("language", "ja")),
+        sentence_aligner=sentence_aligner,
+    )
+    if detect_enabled:
+        detect_config = validate_detect_selection(detect_config, asr_backend)
     detect_stage = None
     detect_summary = None
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    target = address(Path(output_dir) / "run")
+    with target.store.connect():
+        pass
     resume_cache_present = any(
         os.path.isdir(os.path.join(output_dir, name))
         for name in ("asr_subtitles", "chunk_0")
     )
+    from .run_results import record_run
+    record_run(output_dir, "running", audio_path)
     cleaned_count = _clean_previous_run(output_dir)
     start_time = time.time()
 
@@ -385,8 +498,8 @@ def run_pipeline(
     # Development and packaged runs use the same artifact layout. Keeping the
     # run log beside the audio's other outputs also isolates concurrent tasks.
     log_filename = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_path = Path(output_dir) / log_filename
-    log_fp = open_log(log_path, encoding="utf-8")
+    log_path = address(Path(output_dir) / log_filename).reference
+    log_fp = DatabaseLog(log_path, encoding="utf-8")
     _original_stdout = sys.stdout
     tee = PipelineTee(_original_stdout, log_fp)
     sys.stdout = tee
@@ -425,27 +538,56 @@ def run_pipeline(
         # ---- Step 1 ----
         ps("Preparing subtitles (VTT / ASR)...")
         asr_output_language = None
+        asr_preserve_timeline = False
+        asr_needs_japanese_cleanup = True
 
-        from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+        from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
+        vad_cfg = resolve_vad_config({
+            "enabled": vad_enabled,
+            "backend": vad_backend,
+            "endpoint": vad_endpoint,
+            "threshold": vad_threshold,
+            "max_end_silence_time": vad_max_end_silence_time,
+            "max_single_segment_time": vad_max_single_segment_time,
+            "min_sec": vad_min_sec,
+            "target_min_sec": vad_target_min_sec,
+            "target_max_sec": vad_target_max_sec,
+            "max_sec": vad_max_sec,
+            "max_merge_gap_sec": vad_max_merge_gap_sec,
+            "split_window_sec": vad_split_window_sec,
+            "split_overlap_sec": vad_split_overlap_sec,
+        })
+        from .audio_preprocessing import create_audio_preprocessor
+        preparation = create_audio_preprocessor("uvr" if uvr_enabled and not vtt_path else "original",
+                                               **({"endpoint": uvr_endpoint} if uvr_enabled and not vtt_path else {}))
+        analysis_audio = _required_stage("AUDIO_DSP_FAILED", preparation.prepare, audio_path, Path(output_dir))
         asr_cache_key = None
         if not vtt_path and os.path.isfile(audio_path):
             asr_cache_key = cache_key({
+                "stage_contract_version": 8,
+                "analysis_audio": analysis_audio.identity,
                 "audio": file_digest(audio_path), "backend": asr_backend,
-                "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner,
-                "detect": [detect_enabled, sentence_aligner, sentence_detector],
-                "vad": [vad_enabled, vad_max_end_silence_time, vad_max_single_segment_time,
-                        vad_min_sec, vad_target_min_sec, vad_target_max_sec, vad_max_sec,
-                        vad_max_merge_gap_sec, vad_split_window_sec, vad_split_overlap_sec],
+                "settings": public_settings(asr_kwargs), "cleaner": japanese_cleaner if japanese_clean_enabled else "disabled",
+                "non_japanese_filter": _non_japanese_filter_policy() if non_japanese_filter_enabled else "disabled",
+                "detect": detect_cache_signature(detect_config) if detect_enabled else None,
+                "vad": vad_cfg,
             })
         cached_asr = _load_cached_asr(output_dir, asr_kwargs, asr_cache_key) if not vtt_path else None
         if cached_asr is not None:
             print_progress("asr", "正在恢复字幕缓存", 0, 1)
             blocks, asr_output_language, cached_asr_path = cached_asr
+            if asr_cache_key:
+                cached_metadata = SqliteResultCache(output_dir, "asr_stage_results").load(asr_cache_key) or {}
+                asr_preserve_timeline = cached_metadata.get("preserve_source_timeline") is True
+                detect_summary = cached_metadata.get("detect_summary")
             print(f"       [cached-asr] 复用 {len(blocks)} 个字幕块: {cached_asr_path}")
             print_progress("asr", "正在恢复字幕缓存", 1, 1)
         elif vtt_path:
             print_progress("parsing", "正在解析字幕", 0, 1)
+            from .subtitles.artifacts import save_imported_subtitles, save_subtitle_source
+            _required_stage("OUTPUT_WRITE_DENIED", save_subtitle_source, output_dir, vtt_path)
             blocks = parse_vtt(vtt_path)
+            _required_stage("OUTPUT_WRITE_DENIED", save_imported_subtitles, output_dir, blocks)
             print(f"       Found {len(blocks)} subtitle blocks")
             print_progress("parsing", "正在解析字幕", 1, 1)
         else:
@@ -459,18 +601,6 @@ def run_pipeline(
                 )
             # The VAD tuning lives on run_pipeline's vad_* parameters, so the
             # engine config passed here carries only the ASR/transcription knobs.
-            vad_cfg = {
-                "enabled": vad_enabled,
-                "max_end_silence_time": vad_max_end_silence_time,
-                "max_single_segment_time": vad_max_single_segment_time,
-                "min_sec": vad_min_sec,
-                "target_min_sec": vad_target_min_sec,
-                "target_max_sec": vad_target_max_sec,
-                "max_sec": vad_max_sec,
-                "max_merge_gap_sec": vad_max_merge_gap_sec,
-                "split_window_sec": vad_split_window_sec,
-                "split_overlap_sec": vad_split_overlap_sec,
-            }
             print_progress("asr", "正在生成字幕", 0, 1)
             from .error import ASRError
             from .asr_engine import transcribe_slices
@@ -479,27 +609,22 @@ def run_pipeline(
                 adapter = create_asr(asr_backend, **asr_kwargs)
                 document_adapter = adapter if isinstance(adapter, DocumentASRAdapter) else None
                 needs_project_vad = document_adapter is None or document_adapter.uses_project_vad()
-                if detect_eligible(
-                    detect_enabled,
-                    vtt_path,
-                    asr_backend,
-                    asr_kwargs.get(
-                        "output_language", asr_kwargs.get("language", "ja")
-                    ),
-                    project_vad=needs_project_vad,
-                ):
-                    detect_stage = create_detect_stage(detect_config, audio_path)
-                    final_slices, _ = run_analysis_stage(
-                        audio_path, vad_cfg, output_dir)
+                if detect_enabled:
+                    detect_stage = create_detect_stage(detect_config, analysis_audio.path)
+                    if needs_project_vad:
+                        final_slices, _ = run_analysis_stage(
+                            analysis_audio.path, vad_cfg, output_dir)
+                    else:
+                        final_slices = []
                 else:
-                    final_slices = _run_vad_stage(audio_path, vad_cfg, output_dir) if needs_project_vad else []
+                    final_slices = _run_vad_stage(analysis_audio.path, vad_cfg, output_dir) if needs_project_vad else []
                 if needs_project_vad and not final_slices:
                     from .error import VadError, descriptor
                     raise VadError(descriptor("VAD_NO_SPEECH"))
                 elif document_adapter is not None:
                     from .asr.no_speech import ASRNoSpeechError
                     try:
-                        result = asyncio.run(document_adapter.transcribe_document(audio_path, final_slices))
+                        result = asyncio.run(document_adapter.transcribe_document(analysis_audio.path, final_slices))
                     except ASRNoSpeechError:
                         blocks = []
                         asr_output_language = asr_kwargs.get(
@@ -507,12 +632,16 @@ def run_pipeline(
                         )
                         print("       [asr] 整段音频未识别到文字，按空字幕继续")
                     else:
+                        from .asr.document_artifacts import write_document_artifacts
+                        write_document_artifacts(result, output_dir)
                         blocks = result.blocks
+                        asr_preserve_timeline = getattr(result, "preserve_source_timeline", False) is True
+                        asr_needs_japanese_cleanup = getattr(result, "japanese_cleanup_required", True)
                         asr_output_language = result.language
                         print(f"       [asr] 服务来源 {result.source}，时间轴 {result.timeline_source}")
                 else:
                     blocks = transcribe_slices(
-                        audio_path, asr_backend, asr_kwargs,
+                        analysis_audio.path, asr_backend, asr_kwargs,
                         output_dir, final_slices, max_workers=asr_max_concurrent,
                     )
                     asr_output_language = "ja"
@@ -526,22 +655,36 @@ def run_pipeline(
             except Exception as e:
                 print(f"       [warn] ASR 字幕保存失败: {e}")
 
-            if asr_output_language == "ja":
-                if detect_stage is not None:
-                    from .detect.contracts import DetectStageInput
+            if asr_output_language == "ja" and detect_stage is not None:
+                from .detect.contracts import DetectStageInput
+                detected = detect_stage.run(DetectStageInput(tuple(blocks)), output_dir)
+                blocks = list(detected.blocks)
+                detect_summary = detected.summary
+                _write_asr_subtitles(output_dir, blocks, "detected.vtt")
 
-                    detected = detect_stage.run(
-                        DetectStageInput(tuple(blocks)), output_dir
-                    )
-                    blocks = list(detected.blocks)
-                    detect_summary = detected.summary
-
-                # Japanese cleanup consumes only Japanese ASR output. Empty
-                # blocks remain on the authored timeline with skip_tts=True.
-                from .japanese_cleaning import (
+            if asr_output_language == "ja" and not asr_needs_japanese_cleanup:
+                print("       [asr] 使用服务返回的日语字幕和时间轴，直接进入 LLM 阶段")
+            elif asr_output_language == "ja":
+                # Blocks with no Japanese text are dropped first; Japanese
+                # cleanup then keeps blocks it empties on the timeline with
+                # skip_tts=True.
+                from .cleaning import (
+                    NonJapaneseFilterCapability,
+                    NonJapaneseFilterConfig,
                     write_cleaning_artifacts,
+                    write_non_japanese_filter_report,
                 )
-                cleaner = _create_japanese_cleaner_with_fallback(japanese_cleaner)
+                filter_result = NonJapaneseFilterCapability(
+                    NonJapaneseFilterConfig(enabled=non_japanese_filter_enabled)
+                ).filter(blocks)
+                blocks = list(filter_result.blocks)
+                if filter_result.enabled:
+                    report = write_non_japanese_filter_report(filter_result, output_dir)
+                    print(
+                        f"       [non-japanese-filter] 原始 {len(filter_result.records)} 段，"
+                        f"移除无日语片段 {filter_result.removed_count} 段: {report}"
+                    )
+                cleaner = _create_japanese_cleaner_with_fallback(japanese_cleaner) if japanese_clean_enabled else _create_japanese_cleaner_with_fallback(japanese_cleaner, enabled=False)
                 cleaning_result = cleaner.clean(blocks)
                 blocks = cleaning_result.blocks
                 artifacts = write_cleaning_artifacts(cleaning_result, output_dir)
@@ -553,16 +696,29 @@ def run_pipeline(
                 print(f"       [japanese-clean] 清洗字幕: {artifacts['vtt']}")
                 print(f"       [japanese-clean] 清洗报告: {artifacts['report']}")
             elif asr_output_language == "zh":
+                if detect_enabled:
+                    print("       [detect] ASR 已直出中文，没有日语原文，跳过日语句界检测")
                 print("       [asr] 海南鸡已直出中文，跳过日语清洗、总结和翻译")
             else:
                 raise ValueError(f"ASR 返回了不支持的语言：{asr_output_language}")
 
             if asr_cache_key:
-                filename = "raw.vtt" if asr_output_language == "zh" else "cleaned.vtt"
+                asr_preserve_timeline = asr_preserve_timeline or detect_stage is not None
+                filename = "raw.vtt" if asr_output_language == "zh" or not asr_needs_japanese_cleanup else "cleaned.vtt"
+                if detect_stage is not None and not asr_needs_japanese_cleanup:
+                    filename = "detected.vtt"
                 cached_path = os.path.join(output_dir, "asr_subtitles", filename)
-                if os.path.isfile(cached_path):
-                    JsonResultCache(os.path.join(output_dir, "asr_stage_results")).save(
-                        asr_cache_key, {"sha256": file_digest(cached_path)})
+                if contains(cached_path):
+                    SqliteResultCache(output_dir, "asr_stage_results").save(
+                        asr_cache_key, {
+                            "sha256": document_digest(cached_path),
+                            "artifact_filename": filename,
+                            "preserve_source_timeline": asr_preserve_timeline,
+                            "detect_summary": detect_summary,
+                            "block_lineage": [
+                                _serialize_parsed_vtt_block(b) for b in blocks
+                            ],
+                        })
 
         speakers = set(b.speaker for b in blocks if b.speaker)
         if speakers:
@@ -578,14 +734,13 @@ def run_pipeline(
             llm_ctx = dict(llm_kwargs)
             llm_ctx.setdefault("tts_backend", tts_backend)
             llm_ctx.setdefault("tts_model", (tts_backend_kwargs or {}).get("model", ""))
-            if vtt_path or asr_output_language == "zh":
-                from .llm_enhancer import enhance_blocks
-                enhance_stats = enhance_blocks(blocks, llm_ctx, output_dir=output_dir)
-            else:
-                from .llm_enhancer import enhance_asr_blocks
-                blocks, enhance_stats = enhance_asr_blocks(
-                    blocks, llm_ctx, preserve_source_timeline=detect_stage is not None,
-                    output_dir=output_dir)
+            from .subtitle_processing import create_subtitle_stage, SubtitleStageInput
+            subtitle_result = create_subtitle_stage(llm_ctx, output_dir).run(SubtitleStageInput(
+                tuple(blocks), source="subtitles" if vtt_path or asr_output_language == "zh" else "asr",
+                preserve_source_timeline=detect_stage is not None or asr_preserve_timeline,
+            ))
+            blocks = list(subtitle_result.blocks)
+            enhance_stats = subtitle_result.stats
 
         if not blocks:
             if tts_backend == "subtitles-only":
@@ -623,17 +778,13 @@ def run_pipeline(
         # Interjection blocks: a translation with ≤3 Chinese characters (after
         # removing punctuation) is mostly a 语气词/短叹 — skip its translation TTS
         # and keep the original audio for that span.
-        skipped = mark_interjection_skips(blocks)
+        skipped = mark_interjection_skips(blocks, enabled=skip_short_translations)
         if skipped:
             print(f"       [skip-tts] {skipped} 个语气词/短句片段将跳过翻译 TTS（保留原声）")
 
-        _required_stage("OUTPUT_WRITE_DENIED", write_json,
-            os.path.join(intermediate_dir(output_dir, "debug"), "_parsed_vtt.json"), [{
-                "index": b.index, "start_ms": b.start_ms, "end_ms": b.end_ms,
-                "speaker": b.speaker, "text": b.text,
-                "source_text": getattr(b, "source_text", ""),
-                "skip_tts": getattr(b, "skip_tts", False),
-            } for b in blocks])
+        _required_stage("OUTPUT_WRITE_DENIED", save_json,
+            os.path.join(output_dir, "debug", "_parsed_vtt.json"),
+            [_serialize_parsed_vtt_block(b) for b in blocks])
 
         # Export the optimized subtitles as a standalone WebVTT file (only when
         # the LLM actually rewrote something; otherwise there is nothing to show).
@@ -683,12 +834,19 @@ def run_pipeline(
         work_dir = intermediate_dir(output_dir, "chunk_0")
         os.makedirs(work_dir, exist_ok=True)
 
+        from .tts.references import supports_parent_reference, write_reference_profile
         segments = _required_stage("AUDIO_SPLIT_FAILED", split_audio,
             audio_path,
             blocks,
             os.path.join(work_dir, "01_segments"),
             max_workers=pool_cfg.split_workers,
+            include_asr_blocks=supports_parent_reference(tts_backend, tts_backend_kwargs),
+            reference_audio_path=analysis_audio.path,
         )
+        if os.path.isfile(analysis_audio.path):
+            _required_stage("OUTPUT_WRITE_DENIED", write_reference_profile, output_dir,
+                            audio_path, analysis_audio.path, analysis_audio.identity)
+        print(f"       [tts-reference] 自动参考使用{'原始音轨' if analysis_audio.identity == 'original' else 'UVR 人声音轨'}，共 {len(segments)} 段")
 
         def _tts_progress_callback(done, total_count):
             print_progress("tts", "正在生成翻译片段", done, total_count)
@@ -728,32 +886,34 @@ def run_pipeline(
             os.path.join(work_dir, "02_tts"),
             max_workers=pool_cfg.build_workers,
         )
-        segments = _required_stage("AUDIO_DSP_FAILED", align_tts_to_original,
-            segments, tts_volume=tts_volume, max_workers=pool_cfg.build_workers
-        )
-        segments = _required_stage("AUDIO_DSP_FAILED", enforce_tts_budget,
-            segments,
-            max_speed=min(1.25, follow_original_rate),
-            mode="follow_translation" if sync_mode == "follow_translation"
-            else "follow_original",
-            max_workers=pool_cfg.build_workers,
-        )
-
-        for seg in segments:
-            seg["vc_file"] = seg.get("tts_file")
-            if seg.get("skip_tts"):
-                seg["vc_file"] = seg.get("segment_file")
-                print(f"       [skip-tts] seg {seg['index']}: 语气词片段，跳过翻译（保留原声）")
-
-        segments = _required_stage("AUDIO_DSP_FAILED", builder.build,
-            segments,
-            os.path.join(work_dir, builder.subdir),
-            max_workers=pool_cfg.build_workers,
-        )
-        if sync_mode == "follow_translation":
-            segments = _required_stage("AUDIO_DSP_FAILED", apply_follow_translation_cap,
-                segments, max_overhang_ms=follow_translation_overhang_ms
+        timeline_render = getattr(builder, "timeline_render", False) is True
+        if not timeline_render:
+            segments = _required_stage("AUDIO_DSP_FAILED", align_tts_to_original,
+                segments, tts_volume=tts_volume, max_workers=pool_cfg.build_workers
             )
+            segments = _required_stage("AUDIO_DSP_FAILED", enforce_tts_budget,
+                segments,
+                max_speed=min(1.25, follow_original_rate),
+                mode="follow_translation" if sync_mode == "follow_translation"
+                else "follow_original",
+                max_workers=pool_cfg.build_workers,
+            )
+
+            for seg in segments:
+                seg["vc_file"] = seg.get("tts_file")
+                if seg.get("skip_tts"):
+                    seg["vc_file"] = seg.get("segment_file")
+                    print(f"       [skip-tts] seg {seg['index']}: 语气词片段，跳过翻译（保留原声）")
+
+            segments = _required_stage("AUDIO_DSP_FAILED", builder.build,
+                segments,
+                os.path.join(work_dir, builder.subdir),
+                max_workers=pool_cfg.build_workers,
+            )
+            if sync_mode == "follow_translation":
+                segments = _required_stage("AUDIO_DSP_FAILED", apply_follow_translation_cap,
+                    segments, max_overhang_ms=follow_translation_overhang_ms
+                )
         all_segments = segments
         print(f"       Global stages complete, {len(all_segments)} total segments")
 
@@ -762,8 +922,15 @@ def run_pipeline(
         ps("Joining processed segments into final audio...")
         print_progress("concat", "正在合并最终文件", 0, 1)
         final_output = os.path.join(output_dir, "output.wav")
-        _required_stage("AUDIO_JOIN_FAILED", join_audio,
-                        all_segments, final_output, crossfade_ms=crossfade_ms)
+        if timeline_render:
+            from .timeline_render import TimelineRenderConfig, render_initial_timeline
+            joined = _required_stage("AUDIO_JOIN_FAILED", render_initial_timeline,
+                                     all_segments, output_dir, audio_path,
+                                     TimelineRenderConfig(min(1.25, follow_original_rate), tts_volume))
+        else:
+            joined = _required_stage("AUDIO_JOIN_FAILED", join_audio,
+                                     all_segments, final_output, crossfade_ms=crossfade_ms,
+                                     return_timeline=True)
         print_progress("concat", "正在合并最终文件", 1, 1)
 
         # Record last step time
@@ -780,7 +947,7 @@ def run_pipeline(
             "AUDIO_METADATA_FAILED", create_metadata_reader().read, audio_path)
         metadata_report = _required_stage(
             "AUDIO_METADATA_FAILED", write_audio_metadata, source_metadata,
-            (mp3_output, final_output), intermediate_dir(output_dir, "debug"))
+            (mp3_output, final_output), os.path.join(output_dir, "debug"))
         file_size = os.path.getsize(mp3_output) / (1024 * 1024)
         elapsed = time.time() - start_time
 
@@ -810,16 +977,22 @@ def run_pipeline(
             "detect_summary": detect_summary,
             "vad_realignment_summary": detect_summary,
         }
-        from .subtitles.final_export import build_final_subtitles, write_final_vtt
+        from .subtitles.final_export import build_aligned_subtitles, write_final_vtt
         try:
-            result["final_vtt"] = write_final_vtt(build_final_subtitles(blocks), output_dir)
+            cues = build_aligned_subtitles(blocks, joined.placements)
+            result["final_vtt"] = write_final_vtt(cues, output_dir)
+            print(f"       [subtitle.export] {len(cues)} cues → {result['final_vtt']}")
         except Exception as error:
             from .error import ExportError, descriptor
             raise ExportError(descriptor("SUBTITLE_FINAL_EMPTY"), detail=str(error), cause=error) from error
-        from .high_quality_export import write_export_recipe
-        result["high_quality_recipe"] = _required_stage(
-            "OUTPUT_WRITE_DENIED", write_export_recipe, audio_path, all_segments,
-            builder.export_settings(), output_dir, crossfade_ms, follow_translation_overhang_ms)
+        from .high_quality_export import write_export_recipe, write_timeline_recipe
+        if timeline_render:
+            result["high_quality_recipe"] = _required_stage(
+                "OUTPUT_WRITE_DENIED", write_timeline_recipe, audio_path, joined.plan, output_dir)
+        else:
+            result["high_quality_recipe"] = _required_stage(
+                "OUTPUT_WRITE_DENIED", write_export_recipe, audio_path, all_segments,
+                builder.export_settings(), output_dir, crossfade_ms, follow_translation_overhang_ms)
         from .run_results import record_run
         result["run_result"] = _required_stage(
             "OUTPUT_WRITE_DENIED", record_run, output_dir, "succeeded", audio_path)
@@ -828,6 +1001,7 @@ def run_pipeline(
     except Exception as raw_error:
         import traceback
         from .error import unexpected_error
+        record_run(output_dir, "failed", audio_path)
         error = unexpected_error(raw_error)
         error.log_path = str(log_path)
         print(f"\n!!! Pipeline failed:\n{traceback.format_exc()}")

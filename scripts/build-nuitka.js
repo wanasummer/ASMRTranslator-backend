@@ -146,6 +146,7 @@ function main() {
     // executables, so force them into the onefile payload as data files.
     `--include-data-files=${path.join(UNIDIC_DIR, "char.bin")}=unidic_lite/dicdir/char.bin`,
     `--include-data-files=${path.join(UNIDIC_DIR, "matrix.bin")}=unidic_lite/dicdir/matrix.bin`,
+    `--include-data-files=${path.join(ROOT, "modules", "storage_schema.sql")}=modules/storage_schema.sql`,
     `--include-data-files=${GGUF}=modules/vad/model/fsmn-vad.gguf`,
     `--include-data-files=${logDefaults}=modules/_log_upload_defaults.json`,
     `--user-package-configuration-file=${PACKAGE_CONFIG}`,

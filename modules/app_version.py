@@ -6,7 +6,7 @@ import os
 from typing import Mapping
 
 _DISTRIBUTION_NAME = "asmr-translator"
-_FALLBACK_VERSION = "1.5.7"
+_FALLBACK_VERSION = "1.6.0"
 
 
 def resolve_app_version(environ: Mapping[str, str] | None = None) -> str:

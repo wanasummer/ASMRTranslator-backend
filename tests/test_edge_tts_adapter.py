@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import read_text, read_json, contains, address
 """Offline tests for modules.tts.edge_tts_adapter (network fully mocked).
 
 Run from the project root:  python -m unittest tests.test_edge_tts_adapter
@@ -126,8 +128,8 @@ class SynthesizeTest(unittest.TestCase):
 
             self.assertGreater(os.path.getsize(out), 100)
             side = out + ".boundaries.json"
-            self.assertTrue(os.path.exists(side))
-            with open(side, encoding="utf-8") as f:
+            self.assertTrue(contains(side))
+            with StringIO(read_text(side)) as f:
                 data = json.load(f)
             self.assertEqual(data["unit"], "ms")
             self.assertEqual([w["text"] for w in data["words"]], ["你好", "世界"])
@@ -278,7 +280,7 @@ class MicrosoftTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, output)
             with open(output, "rb") as stream:
                 self.assertEqual(stream.read(), audio * 2)
-            with open(output + ".boundaries.json", encoding="utf-8") as stream:
+            with StringIO(read_text(output + ".boundaries.json")) as stream:
                 words = json.load(stream)["words"]
             self.assertEqual([word["text"] for word in words], ["你好", "你好"])
             self.assertGreater(words[1]["offset_ms"], words[0]["offset_ms"])

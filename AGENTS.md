@@ -29,8 +29,41 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
   mutation behavior in the contract.
 - Preserve stable identifiers, ordering, and metadata across stage boundaries unless
   a stage contract explicitly owns changing them.
+- Keep Qwen Force Align and the FSMN/MeCab joint detector as separate intermediate
+  pipelines, selected by the detect-stage factory. Qwen owns its configuration and
+  word-timestamp sentence policy; FSMN owns speech atoms, mora estimates, and joint
+  partitioning. Both consume `DetectStageInput` and return `DetectStageResult` to
+  the common cleanup/translation/export flow. Do not route Qwen through the FSMN
+  aligner registry or pass FSMN sentence evidence into Qwen's partitioner.
+- Include the selected intermediate pipeline's effective settings and policy
+  version in its cache identity when changing its behavior.
+- MOSS consumes project VAD slices sequentially and returns native ASR blocks.
+  Detect is user-selected for every backend. MOSS may select only its dedicated
+  `moss-native` detect stage, which no other backend may select; the factory
+  validates the pairing. Without detect, native blocks go straight to the LLM.
+  `moss-native` refines only within each native block,
+  preserving outer timestamps, VAD lineage, overlapping speakers, and exact text.
+  Punctuation owns candidate boundaries; Qwen word alignment supplies internal
+  timestamps only when splitting is needed. Do not route MOSS through the Qwen
+  sentence pipeline, FSMN/MeCab, or generic Japanese cleanup. Alignment failure
+  explicitly retains the native block. Keep raw ASR and detected output separate
+  in the project database and include effective MOSS policy in cache identity.
 
 ## Code Conventions
+
+- Keep reusable LLM transport/providers in `modules/llm/`, with one capability
+  per `capabilities/capXxx/` directory and registration in `llm/factory.py`.
+  Capabilities consume typed text rows and an injected text-generation port;
+  they must not import pipeline, audio, or subtitle domain modules. Subtitle
+  timing and business orchestration belong in `modules/subtitle_processing/`.
+- Keep subtitle and text cleaning policies in `modules/cleaning/`, with one
+  independently toggleable capability per `capabilities/capXxx/` directory
+  (`capNonJapaneseFilter`, `capJapaneseClean`, `capInterjectionSkip`) backed by
+  its own `Config`.
+- Keep studio arrangement (draft state, subtitle optimization, TTS regeneration,
+  audio plan and renderer) in `modules/arrangement/`. Code outside the package
+  imports only from `modules.arrangement`; `editor.py` only dispatches sidecar
+  actions to the owning submodule.
 
 - Keep public contracts typed and explicit. Use dataclasses, TypedDicts, Protocols,
   or abstract base classes where they make boundaries clearer.
@@ -50,8 +83,14 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
 
 ## Diagnostics and Failure Behavior
 
-- Save raw inputs before transforming them. Save cleaned/optimized artifacts next
-  to a structured JSON audit report when a transformation can discard information.
+- Persist project-generated non-audio data in one project SQLite database using
+  `modules/storage.py` and the shared `storage_schema.sql`. Audio remains on disk.
+  Do not introduce JSON/VTT/log sidecars, legacy-file fallbacks, or SQL in pipeline
+  orchestration. Include the SQL resource explicitly in the Nuitka package.
+
+- Save raw inputs before transforming them. Save cleaned/optimized artifacts and
+  structured audit documents in the same project database when a transformation
+  can discard information.
 - Log counts, stage names, and artifact paths; never log secrets or credentials.
 - Make fallback and degradation behavior explicit rather than silently changing a
   stage's contract.

@@ -14,6 +14,9 @@ import sys
 import tempfile
 import unittest
 import wave
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,7 +24,8 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from modules.audio_splitter import split_audio
-from modules.pipeline import count_cjk_chars, mark_interjection_skips
+from modules.pipeline import count_cjk_chars, mark_interjection_skips, run_pipeline
+from modules.error import PipelineError
 from modules.tts_engine import generate_tts
 from modules.vtt_parser import VTTBlock
 
@@ -52,6 +56,29 @@ class CountCjkCharsTest(unittest.TestCase):
 
 
 class MarkInterjectionSkipsTest(unittest.TestCase):
+    def test_disabled_policy_keeps_short_text_eligible_and_preserves_upstream_skips(self):
+        blocks = [VTTBlock(0, 0, 1000, "不要动"), VTTBlock(1, 1000, 2000, "")]
+        blocks[1].skip_tts = True
+        self.assertEqual(mark_interjection_skips(blocks, enabled=False), 0)
+        self.assertFalse(blocks[0].skip_tts)
+        self.assertTrue(blocks[1].skip_tts)
+
+    def test_pipeline_passes_the_switch_to_short_translation_policy(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                subtitle = Path(directory) / "source.vtt"
+                subtitle.write_text("WEBVTT\n\n00:00:00.100 --> 00:00:00.900\n不要动\n", encoding="utf-8")
+                captured = []
+                def split(audio_path, blocks, *args, **kwargs):
+                    captured.extend(blocks)
+                    raise RuntimeError("stop after subtitle handoff")
+                with mock.patch("modules.pipeline.get_audio_duration", return_value=1), \
+                     mock.patch("modules.pipeline.split_audio", side_effect=split), \
+                     redirect_stdout(StringIO()), self.assertRaises(PipelineError):
+                    run_pipeline("source.wav", str(subtitle), directory, skip_short_translations=enabled)
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(captured[0].skip_tts, enabled)
+
     def test_flags_short_interjections_only(self):
         blocks = [
             VTTBlock(0, 0, 1000, "嗯"),

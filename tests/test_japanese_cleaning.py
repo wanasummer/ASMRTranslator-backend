@@ -1,3 +1,5 @@
+from io import StringIO
+from modules.storage import contains, read_text
 """Tests for the pluggable ASR Japanese-cleaning stage."""
 
 import json
@@ -6,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from modules.japanese_cleaning import (
+from modules.cleaning import (
     JapaneseCleanerUnavailableError,
     MecabRegexJapaneseCleaner,
     MecabTokenizer,
@@ -61,11 +63,11 @@ class MecabRegexCleanerTest(unittest.TestCase):
         result = self.cleaner.clean([VTTBlock(0, 480, 21280, "嗯嗯好き")])
         with tempfile.TemporaryDirectory() as tmp:
             paths = write_cleaning_artifacts(result, tmp)
-            self.assertTrue(os.path.isfile(paths["vtt"]))
-            self.assertTrue(os.path.isfile(paths["report"]))
-            with open(paths["vtt"], encoding="utf-8") as file:
+            self.assertTrue(contains(paths["vtt"]))
+            self.assertTrue(contains(paths["report"]))
+            with StringIO(read_text(paths["vtt"])) as file:
                 self.assertIn("00:00:00.480 --> 00:00:21.280", file.read())
-            with open(paths["report"], encoding="utf-8") as file:
+            with StringIO(read_text(paths["report"])) as file:
                 report = json.load(file)
         self.assertEqual(report["kept"], 1)
         self.assertEqual(report["records"][0]["cleaned"], "好き")
@@ -91,7 +93,7 @@ class JapaneseCleanerFallbackTest(unittest.TestCase):
         fallback = RegexJapaneseCleaner()
         unavailable = JapaneseCleanerUnavailableError("dictionary unavailable")
         with mock.patch(
-            "modules.japanese_cleaning.create_japanese_cleaner",
+            "modules.cleaning.create_japanese_cleaner",
             side_effect=unavailable,
         ) as create:
             from modules.error import PipelineError

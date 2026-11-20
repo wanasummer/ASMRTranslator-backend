@@ -24,7 +24,7 @@ from mutagen.mp4 import MP4Cover
 from mutagen.wave import WAVE
 
 from .audio_splitter import get_ffmpeg_path
-from .io import write_bytes, write_json
+from .storage import save_bytes, save_json
 
 
 class AudioMetadataError(Exception):
@@ -232,9 +232,11 @@ def write_audio_metadata(metadata: AudioMetadata, outputs: tuple[str, ...],
     Output audio bytes are copied, never decoded/re-encoded. Source snapshots
     also retain fields that a particular player may not display.
     """
+    from .storage import initialize_project
+    initialize_project(audit_dir)
     try:
         raw_path = Path(audit_dir) / "source_metadata.id3"
-        write_bytes(str(raw_path), metadata.id3_bytes)
+        raw_reference = save_bytes(str(raw_path), metadata.id3_bytes)
         written = []
         for output in outputs:
             path = Path(output)
@@ -257,7 +259,7 @@ def write_audio_metadata(metadata: AudioMetadata, outputs: tuple[str, ...],
                 staged.replace(path)
             written.append(str(path))
         report = str(Path(audit_dir) / "metadata_copy.json")
-        write_json(report, {"source_snapshot": str(raw_path), "frame_count": metadata.frame_count,
+        report = save_json(report, {"source_snapshot": raw_reference, "frame_count": metadata.frame_count,
                             "picture_count": metadata.picture_count, "outputs": written,
                             "status": "copied"})
         print(f"       [audio.metadata] {metadata.frame_count} tags, {metadata.picture_count} pictures → {report}")

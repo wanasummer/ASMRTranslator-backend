@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 import io
 import json
 from pathlib import Path
@@ -9,12 +10,29 @@ import numpy as np
 
 from modules.high_quality_export import (
     AudioProfile, HighQualityExportError, _append_pcm, load_recipe, probe_audio,
-    render_high_quality, write_export_recipe,
+    render_high_quality, write_export_recipe, write_timeline_recipe,
 )
 from modules.mode_builders import create_segment_builder
 
 
 class RecipeTests(unittest.TestCase):
+    def test_moved_project_rebinds_internal_source_and_keeps_verified_tts(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "before"
+            work = project / "generated/assets/track"
+            work.mkdir(parents=True)
+            source = project / "source.wav"
+            tts = work / "voice.wav"
+            source.write_bytes(b"source")
+            tts.write_bytes(b"voice")
+            write_export_recipe(str(source), [{"index":0,"start_ms":0,"end_ms":1000,"tts_file":str(tts)}], {}, str(work), 0, 0)
+            moved = Path(directory) / "after"
+            shutil.move(str(project),str(moved))
+            recipe, restored = load_recipe(str(moved/"generated/assets/track/debug/high_quality_export.json"))
+            self.assertEqual(restored, moved/"generated/assets/track")
+            self.assertEqual(recipe["source"]["path"], str(moved/"source.wav"))
+
     def test_recipe_is_independent_snapshot_with_verified_tts_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,9 +61,9 @@ class RecipeTests(unittest.TestCase):
             with self.assertRaises(HighQualityExportError):
                 load_recipe(path)
             source.write_bytes(b"original")
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            data = json.loads(read_text(path))
             data["inputs"] = {"../outside.wav": "fake"}
-            Path(path).write_text(json.dumps(data), encoding="utf-8")
+            save_text(path, json.dumps(data))
             with self.assertRaises(HighQualityExportError):
                 load_recipe(path)
 
@@ -112,6 +130,41 @@ class NativeAudioTests(unittest.TestCase):
             self.assertIn("320000", commands[-1])
             self.assertNotIn("192k", commands[-1])
             self.assertEqual(builder.wav_params, profile.wav_params)
+
+    def test_timeline_recipe_rerenders_the_same_arrangement_plan_natively(self):
+        from modules.arrangement import ArrangedClip, ArrangementPlan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, voice = root / "original.wav", root / "chunk_0/02_tts/voice_0000.wav"
+            voice.parent.mkdir(parents=True)
+            source.write_bytes(b"original")
+            voice.write_bytes(b"voice")
+            plan = ArrangementPlan(source, (ArrangedClip(7, 0, 2000, "你好", voice, .85, 0, 1000, 0, 2300),), False)
+            path = write_timeline_recipe(str(source), plan, directory)
+            recipe, work = load_recipe(path)
+            self.assertEqual((recipe["contractVersion"], recipe["renderer"]), (2, "arrangement"))
+            self.assertEqual(recipe["clips"][0]["path"], "chunk_0/02_tts/voice_0000.wav")
+            adapter = Mock()
+            target = root / "output.wav"
+            commands = []
+            def command(args):
+                commands.append(args)
+                target.write_bytes(b"encoded")
+                return b""
+            with (patch("modules.arrangement.create_arrangement_audio_adapter", return_value=adapter),
+                  patch("modules.high_quality_export.probe_audio",
+                        return_value=AudioProfile(44100, 2, 16, "pcm_s16le", 0)),
+                  patch("modules.high_quality_export._command", side_effect=command),
+                  patch("modules.audio_metadata.create_metadata_reader"),
+                  patch("modules.audio_metadata.write_audio_metadata")):
+                render_high_quality(path, str(target))
+            rendered = adapter.render.call_args.args[0]
+            self.assertEqual(rendered.clips[0], ArrangedClip(7, 0, 2000, "你好", work / "chunk_0/02_tts/voice_0000.wav",
+                                                             .85, 0, 1000, 0, 2300))
+            self.assertIn("pcm_s16le", commands[-1])
+            voice.write_bytes(b"changed")
+            with self.assertRaises(HighQualityExportError):
+                load_recipe(path)
 
 
 if __name__ == "__main__":

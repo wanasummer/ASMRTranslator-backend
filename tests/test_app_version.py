@@ -17,7 +17,7 @@ class AppVersionTest(unittest.TestCase):
             "modules.app_version.version",
             side_effect=PackageNotFoundError,
         ):
-            self.assertEqual(resolve_app_version({}), "1.5.7")
+            self.assertEqual(resolve_app_version({}), "1.6.0")
 
 
 if __name__ == "__main__":

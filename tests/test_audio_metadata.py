@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """Player tags survive final exports without modifying source or audio samples."""
 import base64
 from contextlib import ExitStack
@@ -68,8 +69,8 @@ class AudioMetadataTests(unittest.TestCase):
             self.assertTrue(mp3.read_bytes().endswith(b"audio payload unchanged"))
             with wave.open(str(wav), "rb") as audio:
                 self.assertEqual(audio.readframes(240), b"\x01\x02" * 240)
-            self.assertEqual(json.loads(Path(report).read_text(encoding="utf-8"))["picture_count"], 2)
-            self.assertEqual((Path(directory) / "source_metadata.id3").read_bytes(), original.id3_bytes)
+            self.assertEqual(json.loads(read_text(report))["picture_count"], 2)
+            self.assertEqual(read_bytes(Path(directory) / "source_metadata.id3"), original.id3_bytes)
         self.assertEqual(snapshot(source), original)
 
     def test_id3_v23_keeps_multiple_authors(self):
@@ -200,9 +201,11 @@ class AudioMetadataTests(unittest.TestCase):
             def join(segments, output, **kwargs):
                 write_wave(output)
                 Path(output).with_suffix(".mp3").write_bytes(b"audio")
-                return output
+                from modules.audio_joiner import JoinedAudio, SegmentPlacement
+                return JoinedAudio(output, (SegmentPlacement("0", 0, 1000, 0, 1000),))
 
             def record(*args):
+                if args[1] != "succeeded": return "running"
                 self.assertEqual(id3.ID3(Path(output_dir) / "output.mp3")["TPE1"].text,
                                  ["作者一", "作者二", "声优三"])
                 self.assertEqual(len(WAVE(Path(output_dir) / "output.wav").tags.getall("APIC")), 2)
@@ -234,13 +237,36 @@ class AudioMetadataTests(unittest.TestCase):
             reader.read.assert_called_once_with("source.mp3")
             self.assertIs(writer.call_args.args[0], metadata)
             self.assertEqual(writer.call_args.args[1], (result["output_mp3"], result["output_wav"]))
-            self.assertTrue(Path(result["metadata_report"]).is_file())
+            self.assertTrue(contains(result["metadata_report"]))
             from modules.error import PipelineError
             writer.side_effect = AudioMetadataError("tagging failed")
             with self.assertRaises(PipelineError) as error:
                 run_pipeline("source.mp3", "subtitles.vtt", output_dir)
             self.assertEqual(error.exception.descriptor.code, "AUDIO_METADATA_FAILED")
-            recorder.assert_called_once()
+            self.assertEqual([call.args[1] for call in recorder.call_args_list],
+                             ["running", "succeeded", "running", "failed"])
+    def test_locked_output_replace_reports_file_in_use(self):
+        from modules.error import PipelineError
+        from modules.pipeline import _required_stage
+        metadata = snapshot(self.source_tags())
+        with tempfile.TemporaryDirectory() as directory:
+            wav = Path(directory) / "output.wav"
+            write_wave(wav)
+            original = wav.read_bytes()
+
+            def locked(source, target):
+                raise PermissionError(13, "拒绝访问。", str(source), 5, str(target))
+
+            with patch("modules.audio_metadata.Path.replace", autospec=True, side_effect=locked):
+                with self.assertRaises(PipelineError) as error:
+                    _required_stage("AUDIO_METADATA_FAILED", write_audio_metadata,
+                                    metadata, (str(wav),), directory)
+            payload = error.exception.to_payload()
+            self.assertEqual(payload["code"], "OUTPUT_FILE_IN_USE")
+            self.assertEqual(payload["action"], "retry")
+            self.assertIn("占用", payload["message"])
+            self.assertEqual(payload["context"], {"path": str(wav)})
+            self.assertEqual(wav.read_bytes(), original)
 
 
 if __name__ == "__main__":

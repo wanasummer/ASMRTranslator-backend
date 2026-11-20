@@ -4,7 +4,8 @@ import io
 import wave
 
 from ..error import TTSError
-from ..io import open_write, write_json
+from ..io import open_write
+from ..storage import save_json
 from .plugin_contract import TTSSynthesisResult
 
 
@@ -21,5 +22,5 @@ def write_plugin_result(result: TTSSynthesisResult, output_path: str) -> str:
     with open_write(output_path, "wb") as target:
         target.write(result.audio)
     if result.boundaries is not None:
-        write_json(output_path + ".boundaries.json", result.boundaries)
+        save_json(output_path + ".boundaries.json", result.boundaries)
     return output_path

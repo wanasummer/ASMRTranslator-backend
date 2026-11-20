@@ -1,9 +1,19 @@
+from io import StringIO
+from modules.storage import read_text, read_json, contains, address
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
+from contextlib import ExitStack, redirect_stdout
+from io import StringIO
+import json
+from pathlib import Path
+from unittest.mock import Mock, patch
+
 import os
 import tempfile
 import unittest
 
 from modules.subtitles.final_export import (
     FinalSubtitleError,
+    build_aligned_subtitles,
     build_final_subtitles,
     write_final_vtt,
 )
@@ -36,7 +46,7 @@ class FinalSubtitleExportTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as output_dir:
             path = write_final_vtt(cues, output_dir)
-            with open(path, encoding="utf-8", newline="") as file:
+            with StringIO(read_text(path)) as file:
                 content = file.read()
         self.assertIn("遥：第一句", content)
         self.assertNotIn("嗯", content)
@@ -46,6 +56,97 @@ class FinalSubtitleExportTest(unittest.TestCase):
         with self.assertRaises(FinalSubtitleError) as caught:
             build_final_subtitles([self.block(0, 0, 500, "嗯", True)])
         self.assertEqual(caught.exception.code, "SUBTITLE_FINAL_EMPTY")
+
+
+class AlignedSubtitleTest(unittest.TestCase):
+    def test_actual_overlaps_stable_ids_and_omissions_are_preserved(self):
+        from modules.audio_joiner import SegmentPlacement
+        blocks = [VTTBlock(10, 5000, 6000, "第一句", speaker="角色"),
+                  VTTBlock(20, 6000, 7000, "丢弃"),
+                  VTTBlock(30, 7000, 8000, "第三句")]
+        placements = (SegmentPlacement("10", 0, 1000, 0, 1000),
+                      SegmentPlacement("30", 900, 1900, 900, 1900))
+        cues = build_aligned_subtitles(blocks, placements)
+        self.assertEqual([(c.index, c.start_ms, c.end_ms) for c in cues],
+                         [(1, 0, 1000), (2, 900, 1900)])
+        self.assertEqual(cues[0].speaker, "角色")
+        self.assertEqual(blocks[0].start_ms, 5000)
+
+    def test_failed_subtitle_commit_preserves_previous_document(self):
+        from modules.storage import StorageError
+        cues = build_final_subtitles([VTTBlock(0, 0, 100, "字幕")])
+        with tempfile.TemporaryDirectory() as directory:
+            initialize_project(directory)
+            reference = write_final_vtt(cues, directory)
+            original = read_text(reference)
+            with address(reference).store.connect() as connection:
+                connection.execute("CREATE TRIGGER reject_update BEFORE UPDATE ON documents BEGIN SELECT RAISE(ABORT,'full'); END")
+            with self.assertRaises(StorageError):
+                write_final_vtt(cues, directory)
+            self.assertEqual(read_text(reference), original)
+            self.assertFalse((Path(directory) / "llm_subtitles/final.vtt").exists())
+
+    def test_pipeline_exports_returned_timeline_through_existing_final_vtt_contract(self):
+        from modules.pipeline import run_pipeline
+        from modules.audio_joiner import JoinedAudio, SegmentPlacement
+        # CLI import loads the user dotenv; keep it out of other tests.
+        with patch.dict(os.environ):
+            import main
+        with tempfile.TemporaryDirectory() as d, ExitStack() as stack:
+            root = Path(d)
+            source = root / "source.wav"
+            source.write_bytes(b"source")
+            output = root / "work"
+            blocks = [VTTBlock(10, 5000, 6000, "这是第一条测试字幕"),
+                      VTTBlock(20, 7000, 8000, "这是第二条测试字幕")]
+            segments = [{"index": i, "tts_file": "tts.wav"} for i in range(2)]
+            chain = Mock()
+            chain.run.return_value = segments
+            builder = Mock(subdir="built")
+            builder.build.return_value = segments
+            def join(items, path, **kwargs):
+                self.assertTrue(kwargs["return_timeline"])
+                Path(path).write_bytes(b"wav")
+                Path(path).with_suffix(".mp3").write_bytes(b"mp3")
+                return JoinedAudio(path, (SegmentPlacement("10", 0, 800, 0, 800),))
+            for target, value in {
+                "modules.pipeline.parse_vtt": blocks,
+                "modules.pipeline.get_audio_duration": 10,
+                "modules.pipeline.split_audio": segments,
+                "modules.pipeline.generate_tts": segments,
+                "modules.pipeline.build_tts_handler_chain": chain,
+                "modules.pipeline.align_tts_to_original": segments,
+                "modules.pipeline.enforce_tts_budget": segments,
+                "modules.pipeline.create_segment_builder": builder,
+                "modules.audio_metadata.create_metadata_reader": Mock(),
+                "modules.audio_metadata.write_audio_metadata": "metadata.json",
+                "modules.high_quality_export.write_export_recipe": "recipe.json",
+            }.items():
+                stack.enter_context(patch(target, return_value=value))
+            stack.enter_context(patch("modules.pipeline.join_audio", side_effect=join))
+            with redirect_stdout(StringIO()):
+                result = run_pipeline(str(source), "source.vtt", str(output))
+            aligned = Path(result["final_vtt"])
+            self.assertIn("00:00:00.000 --> 00:00:00.800", read_text(result["final_vtt"]))
+            self.assertNotIn(blocks[1].text, read_text(result["final_vtt"]))
+            self.assertEqual(blocks[0].start_ms, 5000)
+            self.assertFalse((output / "llm_subtitles/final.vtt").exists())
+            from test_run_results import latest
+            history = {"runs":{"work":latest(output)}}
+            self.assertEqual(history["runs"]["work"]["files"]["finalVtt"],
+                             "llm_subtitles/final.vtt")
+            frame = StringIO()
+            with redirect_stdout(frame):
+                main._emit_result(result)
+            self.assertEqual(json.loads(frame.getvalue().removeprefix("[PIPELINE_RESULT]"))
+                             ["files"]["finalVtt"], result["final_vtt"])
+            from modules.error import PipelineError
+            with patch("modules.subtitles.final_export.build_aligned_subtitles",
+                       side_effect=FinalSubtitleError("no cues")), redirect_stdout(StringIO()):
+                with self.assertRaises(PipelineError):
+                    run_pipeline(str(source), "source.vtt", str(output))
+            self.assertFalse(aligned.exists())
+
 
 
 if __name__ == "__main__":

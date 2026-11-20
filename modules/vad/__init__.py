@@ -1,10 +1,8 @@
 """Voice-activity detection preprocessing for ASR.
 
-The VAD stage runs before the ASR transcribe step: it finds real speech
-intervals with FSMN-VAD (FunASR), splits the track at the configured pause
-interval (1500 ms) and force-cuts runs past the max segment length (25000 ms),
-then the ASR orchestration shapes the raw regions into slices and feeds them
-to the transcribe pipeline.
+The selected adapter finds speech before ASR. Native FSMN uses its configured
+pause interval and duration cap; the local ASMR plugin owns separate coarse and
+fine segmentation policies. Slice optimization consumes their effective config.
 
 Public API:
     from modules.vad import create_vad, VADEngine, SpeechRegion
@@ -17,7 +15,9 @@ Data models (``models``) and the pure slice-optimization functions
 """
 
 from ..error import VADUnavailableError
-from .engine import FSMNVAD, NoOpVAD, VADEngine, create_vad
+from .base import NoOpVAD, VADEngine
+from .engine import FSMNVAD
+from .factory import create_vad, resolve_vad_config
 from .models import SpeechRegion
 from .segments import optimize_asmr_segments, split_long_segment
 
@@ -26,6 +26,7 @@ __all__ = [
     "NoOpVAD",
     "FSMNVAD",
     "create_vad",
+    "resolve_vad_config",
     "SpeechRegion",
     "VADUnavailableError",
     "optimize_asmr_segments",

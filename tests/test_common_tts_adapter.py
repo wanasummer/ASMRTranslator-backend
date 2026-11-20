@@ -1,3 +1,4 @@
+from modules.storage import initialize_project, read_text, read_bytes, read_json, save_text, save_json, contains, address
 """Model-free tests for schema, per-segment isolation and the HTTP boundary."""
 
 import asyncio
@@ -67,6 +68,24 @@ class ManifestTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_parent_audio_is_sent_only_when_declared_by_the_plugin(self):
+        from modules.tts.references import supports_parent_reference
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.wav"
+            source.write_bytes(wav_bytes())
+            segment = {"index": 0, "text": "中文", "speech_file": str(source), "asr_block_file": str(source)}
+            for declared in (False, True):
+                manifest = descriptor()
+                if declared:
+                    manifest["capabilities"]["optional_assets"] = ["source_asr_block"]
+                self.assertEqual(supports_parent_reference("common-tts", {"manifest": manifest}), declared)
+                adapter = CommonTTSAdapter(manifest=manifest, base_url="http://plugin")
+                bound = adapter.bind_segment(segment)
+                expected = {"source_speech", "source_asr_block"} if declared else {"source_speech"}
+                self.assertEqual({asset.role for asset in bound._request.assets}, expected)
+                self.assertNotIn("reference_scope", bound.cache_inputs()["parameters"])
+            self.assertIn("asr_block_file", segment)
+
     def test_required_segment_roles_are_checked_after_reference_preflight_before_http(self):
         manifest = descriptor()
         manifest["capabilities"]["required_assets"] = ["source_speech", "source_segment", "voice_reference"]
@@ -163,7 +182,7 @@ class AdapterTests(unittest.TestCase):
             adapter = adapter.bind_segment({"index": 0, "segment_id": "42", "text": "中文", "speech_file": str(path)})
             target = Path(folder) / "tts.wav"
             asyncio.run(adapter.synthesize("中文", "", str(target)))
-            report = json.loads(Path(str(target) + ".boundaries.json").read_text(encoding="utf-8"))
+            report = json.loads(read_text(str(target) + ".boundaries.json"))
             self.assertEqual(report["words"][0]["text"], "中文")
 
     def test_large_constructor_configuration_can_be_read_from_stdin(self):

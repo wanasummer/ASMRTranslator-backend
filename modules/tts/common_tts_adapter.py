@@ -67,13 +67,17 @@ class CommonTTSAdapter(TTSAdapter):
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.manifest["execution"]["max_concurrent"])
         adapter = copy.copy(self)
-        adapter._request = TTSSynthesisRequest.from_segment(segment)
+        from .references import supports_parent_reference
+        bound = dict(segment)
+        if not supports_parent_reference("common-tts", {"manifest": self.manifest}):
+            bound.pop("asr_block_file", None)
+        adapter._request = TTSSynthesisRequest.from_segment(bound)
         return adapter
 
     def prepare_text(self, text: str) -> str:
         if self.manifest["capabilities"].get("text_policy") == "preserve":
             return text
-        from ..llm_enhancer import strip_emotion_tags
+        from ..text_normalization import strip_emotion_tags
         return strip_emotion_tags(text)
 
     def cache_inputs(self) -> dict:

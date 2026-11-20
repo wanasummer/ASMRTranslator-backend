@@ -7,10 +7,11 @@ from ..audio_splitter import get_audio_duration
 from .analysis import analyze_regions, identify_regions
 from .artifacts import write_analysis, write_initial_regions
 from .contracts import VadAnalysisError
-from .engine import create_vad
+from .factory import create_vad, resolve_vad_config
 
 
 def run_analysis_stage(audio_path, vad_config, output_dir):
+    vad_config = resolve_vad_config(vad_config)
     engine = create_vad({**vad_config, "strict": True})
     if not engine.available:
         raise VadAnalysisError("VAD_ANALYSIS_FAILED", "Initial VAD unavailable")

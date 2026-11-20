@@ -21,7 +21,7 @@ from .network import async_client, async_operation
 
 from .asr import FunASRAdapter, QwenAudio31ASRFlashAdapter
 from .error import ASRError, LLMError
-from .llm_enhancer import LLMClient, LLMConfig, is_configured
+from .llm import LLMRuntime, LLMConfig, is_configured
 
 
 class PreflightError(RuntimeError):
@@ -93,7 +93,7 @@ async def _check_llm(config: Mapping[str, Any]) -> None:
     if not is_configured(llm_config):
         raise PreflightError("大模型配置不完整，请填写 Provider、模型和 API Key")
     try:
-        await LLMClient(llm_config).check_connection()
+        await LLMRuntime(llm_config).check_connection()
     except LLMError as exc:
         status = exc.context.get("status")
         if status == 503:
@@ -146,6 +146,17 @@ async def _check_asr(config: Mapping[str, Any]) -> None:
                 headers={"api-key": api_key},
             )
         _raise_for_status(response, "MiMo ASR")
+        return
+    if engine == "moss-transcribe-diarize":
+        from .analysis_plugins import validate_endpoint
+        endpoint = validate_endpoint(_endpoint(_text(config, "asrBaseUrl"), _port(config, "asrPort")))
+        async with async_client(client_factory=httpx.AsyncClient, timeout=120.0) as client:
+            response = await client.get(endpoint + "/health")
+        _raise_for_status(response, "MOSS")
+        payload = response.json()
+        if (payload.get("service") != engine or payload.get("api_version") != "moss-transcribe-diarize/1"
+                or payload.get("status") != "ok" or payload.get("ready") is not True):
+            raise PreflightError("MOSS 服务身份不匹配或模型尚未就绪")
         return
     if engine != "common-asr":
         raise PreflightError(f"不支持的 ASR 引擎：{engine or '未配置'}")
@@ -284,7 +295,37 @@ async def _check_tts(config: Mapping[str, Any]) -> None:
     raise PreflightError(f"不支持的 TTS 引擎：{backend or '未配置'}")
 
 
+async def _check_analysis(config, *, service, api_version, key, default):
+    from .analysis_plugins import validate_endpoint
+    endpoint = validate_endpoint(_text(config, key) or default)
+    async with async_client(client_factory=httpx.AsyncClient, timeout=15.0) as client:
+        response = await client.get(endpoint + "/health")
+    _raise_for_status(response, service)
+    body = response.json()
+    if (body.get("service") != service or body.get("api_version") != api_version
+            or body.get("status") != "ok" or body.get("ready") is not True):
+        raise PreflightError("分析插件未就绪或服务类型不匹配")
+
+
+async def _check_vad(config):
+    from .vad.local_runtime import check_local_vad
+    await asyncio.to_thread(check_local_vad)
+
+
+async def _check_alignment(config):
+    await _check_analysis(config, service="qwen-force-align", api_version="qwen-force-align/1",
+                          key="qwenAlignEndpoint", default="http://127.0.0.1:8007")
+
+
+async def _check_uvr(config):
+    await _check_analysis(config, service="uvr", api_version="uvr/1",
+                          key="uvrEndpoint", default="http://127.0.0.1:8008")
+
+
 _CHECKS: dict[str, Callable[[Mapping[str, Any]], Awaitable[None]]] = {
+    "vad": _check_vad,
+    "alignment": _check_alignment,
+    "uvr": _check_uvr,
     "llm": _check_llm,
     "asr": _check_asr,
     "chickenrice": _check_chickenrice,
@@ -298,7 +339,7 @@ async def run_preflight_check(service: str, config: Mapping[str, Any]) -> Prefli
         return PreflightResult(False, f"不支持的预检服务：{service or '未指定'}")
     try:
         await check(config)
-        return PreflightResult(True, "配置正确，服务连接正常")
+        return PreflightResult(True, "本地 ASMR VAD 模型已就绪" if service == "vad" else "配置正确，服务连接正常")
     except PreflightError as exc:
         return PreflightResult(False, str(exc))
     except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:

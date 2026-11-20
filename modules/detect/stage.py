@@ -21,12 +21,13 @@ def detect_eligible(
     language,
     llm_config=None,
     project_vad=True,
+    sentence_aligner="joint-vad",
 ):
+    # Every backend, including MOSS with its dedicated pipeline, runs detect
+    # only when the user selects it.
     return bool(
         enabled
         and not subtitle_path
-        and project_vad
-        and backend in ("fish-asr", "common-asr")
         and language == "ja"
     )
 
@@ -47,12 +48,15 @@ def _vocalization_reason(text, config):
 class DefaultDetectStage:
     """Coordinate injected analysis/alignment implementations and persistence."""
 
-    def __init__(self, config: DetectConfig, sentence_detector, aligner):
+    def __init__(self, config: DetectConfig, sentence_detector, aligner, *, asr_boost=None):
         self.config = config
         self.sentence_detector = sentence_detector
         self.aligner = aligner
+        self.asr_boost = asr_boost
 
     def run(self, value: DetectStageInput, output_dir: str) -> DetectStageResult:
+        if self.asr_boost is not None:
+            value = self.asr_boost.prepare(value, output_dir)
         asr_blocks = value.asr_blocks
         write_detect_artifact(
             output_dir,
@@ -69,9 +73,15 @@ class DefaultDetectStage:
         }
         records, output, seen = [], [], set()
 
-        for block in asr_blocks:
-            parent = block.asr_slice
-            if parent is None or parent.id in seen:
+        for position, block in enumerate(asr_blocks):
+            # Document ASR owns its timestamps and need not provide project VAD
+            # lineage. Derive a stable parent without mutating the source block.
+            parent = block.asr_slice or AsrSlice(
+                f"document-asr:{position}:{block.index}",
+                block.start_ms, block.end_ms, block.start_ms, block.end_ms,
+                (f"document-asr:{position}:{block.index}",),
+            )
+            if parent.id in seen:
                 raise DetectError(
                     "DETECT_LINEAGE_INVALID",
                     "ASR block lost or duplicated its slice identity",
@@ -83,6 +93,7 @@ class DefaultDetectStage:
             )
             bypass_reason = (
                 "skip_tts" if block.skip_tts
+                else "plugin_disabled" if getattr(getattr(block, "asr_boost_plan", None), "enabled", True) is False
                 else _vocalization_reason(source_text, self.config)
             )
             request = AlignmentRequest(
@@ -90,6 +101,7 @@ class DefaultDetectStage:
                 parent.id,
                 detection,
                 bypass_reason,
+                asr_boost_plan=getattr(block, "asr_boost_plan", None),
             )
             result = self.aligner.align(request)
             records.append((parent.id, detection, request, result))
@@ -109,6 +121,12 @@ class DefaultDetectStage:
             summary["eligibleSlices"] += result.outcome != "bypassed"
 
             for aligned in result.blocks:
+                if aligned.source_start_ms is None or aligned.source_end_ms is None:
+                    aligned = replace(
+                        aligned,
+                        source_start_ms=parent.speech_start_ms,
+                        source_end_ms=parent.speech_end_ms,
+                    )
                 sentence_slice = AsrSlice(
                     aligned.id,
                     aligned.start_ms,
@@ -132,8 +150,11 @@ class DefaultDetectStage:
                 ))
 
         previous_end = -1
+        # Document backends may author overlapping speaker turns. Preserve those
+        # ranges; project VAD slices retain their strict non-overlap contract.
+        document_timeline = any(block.asr_slice is None for block in asr_blocks)
         for block in output:
-            if block.start_ms < previous_end or block.end_ms <= block.start_ms:
+            if (not document_timeline and block.start_ms < previous_end) or block.end_ms <= block.start_ms:
                 raise DetectError(
                     "DETECT_ALIGNMENT_INVALID",
                     "Invalid global sentence timeline",

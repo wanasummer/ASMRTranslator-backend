@@ -40,10 +40,11 @@ from .asr.segmentation import (
     to_absolute,
 )
 from .error import ASRError
-from .io import intermediate_dir, write_json
+from .io import intermediate_dir
+from .storage import save_json
 from .pipeline_logger import print_progress
 from .vtt_parser import VTTBlock
-from .task_cache import JsonResultCache, cache_key, file_digest, public_settings
+from .task_cache import SqliteResultCache, cache_key, file_digest, public_settings
 
 # Default backend — the only ASR engine shipped.
 _DEFAULT_BACKEND = "fish-asr"
@@ -275,8 +276,8 @@ def _write_debug_json(output_dir: str, chunks, pairs, abs_segs, sentences) -> No
             for s in sentences
         ],
     }
-    write_json(
-        os.path.join(intermediate_dir(output_dir, "asr_subtitles"),
+    save_json(
+        os.path.join(os.path.join(output_dir, "asr_subtitles"),
                      "asr_debug.json"),
         debug,
     )
@@ -330,7 +331,7 @@ def process_audio(
     t1 = time.perf_counter()
     pairs = asyncio.run(_transcribe_chunks(
         chunks, adapter, max_workers, _progress,
-        JsonResultCache(os.path.join(output_dir, "asr_results")),
+        SqliteResultCache(output_dir, "asr_results"),
         _build_adapter_kwargs(asr_kwargs, cfg, language),
     ))
     print(f"       [asr] 语音识别完成：{len(pairs)}/{len(chunks)}，"
@@ -448,6 +449,7 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
     """
     ordered = _collapse_overlapping_slices(slices)
     text_by_slice: list[list[str]] = [[] for _ in ordered]
+    spans_by_slice: list[list[dict]] = [[] for _ in ordered]
 
     def _assign(sent):
         # Prefer the slice containing the sentence start; fall back to the
@@ -466,9 +468,14 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
         idx = _assign(s)
         if idx is not None:
             text_by_slice[idx].append(s.text)
+            spans_by_slice[idx].append({
+                "start_ms": round(s.start * 1000),
+                "end_ms": round(s.end * 1000),
+                "text": s.text,
+            })
 
     out: list[VTTBlock] = []
-    for i, (r, parts) in enumerate(zip(ordered, text_by_slice)):
+    for i, (r, parts, spans) in enumerate(zip(ordered, text_by_slice, spans_by_slice)):
         if not parts:
             continue
         out.append(VTTBlock(
@@ -478,6 +485,7 @@ def _group_sentences_into_slices(sentences, slices) -> list[VTTBlock]:
             text="".join(parts),
             asr_slice=getattr(r, "asr_slice", None),
             source_text="".join(parts),
+            asr_boost_spans=tuple(spans),
         ))
     return out
 

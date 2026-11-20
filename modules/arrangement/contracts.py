@@ -1,0 +1,132 @@
+"""Stable values passed from arrangement preparation to rendering and writing."""
+from dataclasses import dataclass
+from pathlib import Path
+from typing import NotRequired, Protocol, TypedDict
+
+
+class ArrangementError(RuntimeError):
+    """Invalid arrangement data or unavailable source artifacts."""
+
+
+class Interval(TypedDict):
+    start: float
+    end: float
+
+
+class Replacement(TypedDict):
+    path: str
+    text: str
+    # The fragment TTS profile the audio was synthesized with; absent means the generation profile.
+    tts: NotRequired[dict | None]
+
+
+class InsertedFragment(TypedDict):
+    """Timing of a user-added fragment that has no baseline subtitle row."""
+    startMs: float
+    endMs: float
+    sourceBlockId: NotRequired[str | None]
+    speaker: NotRequired[str | None]
+
+
+class DualFragmentEdit(TypedDict, total=False):
+    """Retain-original (dual mode) coarse-block edits isolated from overlay ``interval``."""
+    originalInterval: Interval | None
+    ttsInterval: Interval | None
+    originalSample: Interval | None
+    originalDeleted: bool
+    ttsDeleted: bool
+    trailingGapMs: float
+
+
+class ArrangementEdit(TypedDict):
+    index: int
+    text: str
+    japanese: str
+    volume: float
+    interval: Interval | None
+    replacement: Replacement | None
+    deleted: bool
+    originalInterval: Interval | None
+    ttsSample: Interval | None
+    inserted: NotRequired[InsertedFragment | None]
+    # Block override written when a merge joins fragments from different blocks; absent keeps the baseline block.
+    blockId: NotRequired[str | None]
+    # Public per-fragment TTS profile (no credentials); absent synthesizes with the generation profile.
+    tts: NotRequired[dict | None]
+    dual: NotRequired[DualFragmentEdit | None]
+
+
+class ArrangementState(TypedDict):
+    schemaVersion: int
+    sourceVersion: str
+    loudnessScope: str
+    globalVolume: float
+    segments: list[ArrangementEdit]
+    dualAutoScale: NotRequired[bool]
+
+
+@dataclass(frozen=True)
+class ArrangedClip:
+    index: int
+    start_ms: int
+    end_ms: int
+    text: str
+    path: Path | None
+    volume: float
+    reference_start_ms: int
+    reference_end_ms: int
+    sample_start_ms: int = 0
+    sample_end_ms: int | None = None
+    block_id: str = ""
+    dual_original_start_ms: int | None = None
+    dual_original_end_ms: int | None = None
+    dual_tts_start_ms: int | None = None
+    dual_tts_end_ms: int | None = None
+    original_sample_start_ms: int = 0
+    original_sample_end_ms: int | None = None
+    original_deleted: bool = False
+    tts_deleted: bool = False
+    trailing_gap_ms: int = 0
+    original_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class RenderedTake:
+    """A clip synthesized during rendering because the draft text had no matching audio yet."""
+    index: int
+    text: str
+    path: str
+    start_ms: int
+    end_ms: int
+    sample_end_ms: int
+    tts: dict | None = None
+
+
+@dataclass(frozen=True)
+class TtsVoice:
+    """Resolved synthesis settings for one fragment; ``kwargs`` may carry credentials and is never persisted."""
+    backend: str
+    rate: str
+    pitch: str
+    kwargs: dict
+
+
+@dataclass(frozen=True)
+class ArrangementPlan:
+    source_audio: Path
+    clips: tuple[ArrangedClip, ...]
+    global_loudness: bool
+    takes: tuple[RenderedTake, ...] = ()
+    listen_mode: str = "overlay"
+    gap_ms: int = 200
+
+
+@dataclass(frozen=True)
+class ArrangementAudioResult:
+    audio: object
+    clips: tuple[ArrangedClip, ...]
+    origin_shift_ms: int = 0
+
+
+class ArrangementAudioAdapter(Protocol):
+    def render(self, plan: ArrangementPlan) -> ArrangementAudioResult: ...

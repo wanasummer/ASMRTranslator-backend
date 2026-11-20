@@ -224,6 +224,8 @@ Examples:
     parser.add_argument("--follow-translation-overhang", type=int, default=3000,
                         help="跟随翻译：允许翻译超出原声窗口的保底空白时长 ms（0-3000，"
                              "默认 3000；超出将截断）")
+    parser.add_argument("--no-skip-short-translations", action="store_true",
+                        help="为不超过 3 个汉字的短译文也生成配音（默认跳过并保留原声）")
     parser.add_argument("--no-tts-check", action="store_true",
                         help="Disable the post-TTS artifact check (male-voice/"
                              "mechanical detection + regenerate-once)")
@@ -237,7 +239,7 @@ Examples:
                              '"api_key":"...","model":"gpt-4o-mini"}. When provided, the '
                              'parsed subtitles are optimized before TTS.')
     parser.add_argument("--asr-backend", type=str, default="fish-asr",
-                        choices=["fish-asr", "qwen-audio-3.1-asr-flash", "fun-asr", "mimo-asr", "chickenrice", "common-asr"],
+                        choices=["fish-asr", "qwen-audio-3.1-asr-flash", "fun-asr", "mimo-asr", "chickenrice", "common-asr", "moss-transcribe-diarize"],
                         help="ASR engine used to generate subtitles when no VTT "
                              "file is provided (default: fish-asr)")
     parser.add_argument("--asr-kwargs", type=str, default=None,
@@ -250,12 +252,28 @@ Examples:
                              "with HTTP 429 (default: 3)")
     parser.add_argument("--japanese-cleaner", type=str, default="mecab-regex",
                         help="Japanese ASR cleanup implementation registered in "
-                             "modules.japanese_cleaning (default: mecab-regex)")
+                             "modules.cleaning (default: mecab-regex)")
+    parser.add_argument("--no-japanese-clean", action="store_true",
+                        help="Disable Japanese ASR cleanup before translation")
+    parser.add_argument("--no-non-japanese-filter", action="store_true",
+                        help="Keep Japanese ASR blocks that contain no Japanese text "
+                             "(default: drop them before cleanup)")
     parser.add_argument("--detect-stage", "--vad-sentence-realignment-beta",
                         dest="detect_stage", action="store_true",
                         help="Enable Japanese sentence detection after ASR and before cleanup")
+    parser.add_argument("--no-asr-boost", action="store_true",
+                        help="Disable ASR Boost word-timestamp interval pre-stage before sentence alignment")
     parser.add_argument("--sentence-aligner", type=str, default="joint-vad",
-                        help="Detect-stage sentence aligner implementation (default: joint-vad)")
+                        choices=["joint-vad", "qwen-force-align", "moss-native", "asr-boost"],
+                        help="Detect-stage pipeline (default: joint-vad; MOSS ASR requires moss-native)")
+    parser.add_argument("--qwen-align-endpoint", default="http://127.0.0.1:8007")
+    parser.add_argument("--uvr-enabled", action="store_true", help="Prepare a separate UVR analysis track before VAD/ASR")
+    parser.add_argument("--uvr-endpoint", default="http://127.0.0.1:8008")
+    parser.add_argument("--moss-recalibrate", action="store_true",
+                        help="Experimental: verify MOSS acoustic split boundaries by re-recognizing both sides with MOSS and recompute rejected boundaries")
+    parser.add_argument("--vad-backend", choices=["fsmn-vad", "asmr-vad"], default="fsmn-vad")
+    parser.add_argument("--vad-endpoint", default="http://127.0.0.1:8006")
+    parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--sentence-detector", type=str, default="mecab-japanese",
                         help="Detect-stage Japanese sentence detector (default: mecab-japanese)")
     parser.add_argument("--no-vad", action="store_true",
@@ -367,7 +385,7 @@ Examples:
     # Build/runtime health check: initialize the packaged MeCab extension,
     # open the bundled UniDic files, and perform one real tokenization.
     if args.check_japanese_runtime:
-        from modules.japanese_cleaning import MecabTokenizer
+        from modules.cleaning import MecabTokenizer
 
         diagnostic = {"available": False, "tokenizer": "mecab-unidic-lite"}
         try:
@@ -644,15 +662,26 @@ Examples:
         phantom_virtual_fade=args.phantom_virtual_fade,
         follow_translation_overhang_ms=max(0, min(3000, args.follow_translation_overhang)),
         tts_check_artifact=not args.no_tts_check,
+        skip_short_translations=not args.no_skip_short_translations,
         follow_original_rate=max(1.0, min(1.25, args.follow_original_rate)),
         llm_kwargs=llm_kwargs,
         asr_kwargs=asr_kwargs,
         asr_backend=args.asr_backend,
         asr_max_concurrent=args.asr_max_concurrent,
         japanese_cleaner=args.japanese_cleaner,
+        japanese_clean_enabled=not args.no_japanese_clean,
+        non_japanese_filter_enabled=not args.no_non_japanese_filter,
         vad_enabled=not args.no_vad,
         detect_enabled=args.detect_stage,
+        asr_boost_enabled=not args.no_asr_boost,
         sentence_aligner=args.sentence_aligner,
+        qwen_align_endpoint=args.qwen_align_endpoint,
+        uvr_enabled=args.uvr_enabled,
+        uvr_endpoint=args.uvr_endpoint,
+        moss_recalibrate=args.moss_recalibrate,
+        vad_backend=args.vad_backend,
+        vad_endpoint=args.vad_endpoint,
+        vad_threshold=args.vad_threshold,
         sentence_detector=args.sentence_detector,
         vad_max_end_silence_time=args.vad_max_end_silence_time,
         vad_max_single_segment_time=args.vad_max_single_segment_time,

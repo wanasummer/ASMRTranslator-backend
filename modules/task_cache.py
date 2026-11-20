@@ -7,11 +7,10 @@ Credentials never appear in serialized configuration or audit messages.
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
 
 from .error import safe_detail
-from .io import write_json
 
 
 def public_settings(value: Any) -> Any:
@@ -48,37 +47,37 @@ class ResultCache(Protocol):
     def fail(self, key: str, error: Exception) -> None: ...
 
 
-class JsonResultCache:
-    """One atomic UTF-8 record per unit; safe across independent worker writes."""
+class SqliteResultCache:
+    """Content-addressed records, committed atomically in the project database."""
 
-    def __init__(self, directory: str):
-        self.directory = directory
+    def __init__(self, work_dir: str, namespace: str = "default"):
+        from .storage import address, initialize_project
+        initialize_project(work_dir)
+        target = address(Path(work_dir) / "cache")
+        self.store, self.scope = target.store, target.scope
+        prefix = target.key.rsplit("/", 1)[0] + "/" if "/" in target.key else ""
+        self.namespace = prefix + namespace
 
     def load(self, key: str) -> Any:
-        try:
-            with open(os.path.join(self.directory, key + ".json"), encoding="utf-8") as source:
-                record = json.load(source)
-            if record.get("version") == 1 and record.get("status") == "succeeded":
-                return record["result"]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
-        return None
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM cache_entries WHERE scope=? AND namespace=? AND cache_key=? AND status='succeeded'",
+                (self.scope, self.namespace, key)).fetchone()
+        return json.loads(row[0]) if row else None
 
-    def _write(self, key: str, record: dict) -> None:
-        path = os.path.join(self.directory, key + ".json")
-        temporary = path + "." + uuid4().hex + ".tmp"
-        try:
-            write_json(temporary, {"version": 1, **record})
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.remove(temporary)
+    def _write(self, key: str, status: str, value: Any) -> None:
+        from .storage import encode_json
+        import time
+        with self.store.connect() as connection:
+            connection.execute("""INSERT INTO cache_entries(scope,namespace,cache_key,status,payload,updated_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(scope,namespace,cache_key) DO UPDATE SET
+                status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at""",
+                (self.scope, self.namespace, key, status, encode_json(value).decode('utf-8'), time.time_ns() // 1_000_000))
 
     def save(self, key: str, result: Any) -> None:
-        self._write(key, {"status": "succeeded", "result": result})
+        self._write(key, "succeeded", result)
 
     def fail(self, key: str, error: Exception) -> None:
         descriptor = getattr(error, "descriptor", None)
-        self._write(key, {"status": "failed", "code": getattr(descriptor, "code", ""),
-                          "detail": safe_detail(error),
-                          "context": public_settings(getattr(error, "context", {}))})
+        self._write(key, "failed", {"code": getattr(descriptor, "code", ""), "detail": safe_detail(error),
+                                  "context": public_settings(getattr(error, "context", {}))})
