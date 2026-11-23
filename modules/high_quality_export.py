@@ -12,7 +12,7 @@ import tempfile
 
 import numpy as np
 
-from .audio_splitter import get_ffmpeg_path
+from .audio_splitter import get_ffmpeg_path, get_ffprobe_path
 from .storage import save_json
 from .storage import address, read_json
 from .task_cache import file_digest
@@ -61,7 +61,8 @@ def _command(args: list[str]) -> bytes:
 
 def probe_audio(path: str) -> AudioProfile:
     ffmpeg = Path(get_ffmpeg_path())
-    probe = str(ffmpeg.with_name("ffprobe.exe")) if ffmpeg.name == "ffmpeg.exe" else "ffprobe"
+    sibling = ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix.lower() == ".exe" else "ffprobe")
+    probe = str(sibling) if ffmpeg.name.lower() in ("ffmpeg.exe", "ffmpeg") and sibling.is_file() else get_ffprobe_path()
     data = json.loads(_command([probe, "-v", "error", "-select_streams", "a:0",
         "-show_entries", "stream=sample_rate,channels,bits_per_sample,bits_per_raw_sample,codec_name,bit_rate",
         "-of", "json", path]))

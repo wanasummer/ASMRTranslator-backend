@@ -19,7 +19,7 @@ class RecipeTests(unittest.TestCase):
     def test_moved_project_rebinds_internal_source_and_keeps_verified_tts(self):
         import shutil
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory) / "before"
+            project = Path(directory).resolve() / "before"
             work = project / "generated/assets/track"
             work.mkdir(parents=True)
             source = project / "source.wav"
@@ -27,7 +27,7 @@ class RecipeTests(unittest.TestCase):
             source.write_bytes(b"source")
             tts.write_bytes(b"voice")
             write_export_recipe(str(source), [{"index":0,"start_ms":0,"end_ms":1000,"tts_file":str(tts)}], {}, str(work), 0, 0)
-            moved = Path(directory) / "after"
+            moved = Path(directory).resolve() / "after"
             shutil.move(str(project),str(moved))
             recipe, restored = load_recipe(str(moved/"generated/assets/track/debug/high_quality_export.json"))
             self.assertEqual(restored, moved/"generated/assets/track")

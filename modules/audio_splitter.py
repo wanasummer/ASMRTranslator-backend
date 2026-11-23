@@ -1,7 +1,9 @@
 """Split the continuous pink timeline after decoding the source exactly once."""
 
 import os
+import shutil
 import subprocess
+import sys
 import wave
 from contextlib import ExitStack
 from pathlib import Path
@@ -10,17 +12,90 @@ from .pink_segments import calculate_pink_segments
 from .vtt_parser import VTTBlock
 
 
+def _candidate_ffmpeg_dirs(module_file: str | Path = __file__) -> list[Path]:
+    """Return ffmpeg_bin candidate directories in priority order (resources first)."""
+    candidates: list[Path] = []
+    env_dir = os.environ.get("ASMR_FFMPEG_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    if sys.argv and sys.argv[0]:
+        argv_dir = Path(sys.argv[0]).resolve().parent
+        candidates.append(argv_dir / "ffmpeg_bin")
+        candidates.append(argv_dir / "resources" / "ffmpeg_bin")
+    candidates.append(Path(module_file).resolve().parent.parent / "ffmpeg_bin")
+    executable = getattr(sys, "executable", None)
+    if executable:
+        exe_dir = Path(executable).resolve().parent
+        candidates.append(exe_dir / "ffmpeg_bin")
+        candidates.append(exe_dir / "resources" / "ffmpeg_bin")
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = os.path.normcase(os.path.normpath(str(candidate)))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _prepend_path_dir(directory: Path) -> None:
+    """Ensure `directory` is at the front of PATH for pydub and subprocess lookups."""
+    dir_str = str(directory)
+    current = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    norm_dir = os.path.normcase(os.path.normpath(dir_str))
+    if current and os.path.normcase(os.path.normpath(current[0])) == norm_dir:
+        return
+    filtered = [entry for entry in current if os.path.normcase(os.path.normpath(entry)) != norm_dir]
+    os.environ["PATH"] = os.pathsep.join([dir_str, *filtered])
+
+
+def _binary_names(stem: str) -> tuple[str, str]:
+    return (f"{stem}.exe", stem) if os.name == "nt" else (stem, f"{stem}.exe")
+
+
+def _resolve_audio_binary(stem: str, module_file: str | Path = __file__) -> str:
+    """Resolve `ffmpeg`/`ffprobe` from bundled resources first, falling back to PATH."""
+    names = _binary_names(stem)
+    for directory in _candidate_ffmpeg_dirs(module_file):
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file():
+                _prepend_path_dir(directory)
+                return str(candidate)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return stem
+
+
+def ensure_ffmpeg_on_path(module_file: str | Path = __file__) -> None:
+    """Prepend the bundled resources/ffmpeg_bin directory to PATH when available."""
+    dirs = _candidate_ffmpeg_dirs(module_file)
+    names = _binary_names("ffmpeg")
+    ffmpeg_dir = next(
+        (d for d in dirs if any((d / name).is_file() for name in names)),
+        next((d for d in dirs if d.is_dir()), None),
+    )
+    if ffmpeg_dir is not None:
+        _prepend_path_dir(ffmpeg_dir)
+
+
 def get_ffmpeg_path() -> str:
-    local_path = Path(__file__).parent.parent / "ffmpeg_bin" / "ffmpeg.exe"
-    return str(local_path) if local_path.exists() else "ffmpeg"
+    return _resolve_audio_binary("ffmpeg")
+
+
+def get_ffprobe_path() -> str:
+    return _resolve_audio_binary("ffprobe")
+
+
+ensure_ffmpeg_on_path()
 
 
 def get_audio_duration(audio_path: str) -> float:
-    local_ffprobe = str(Path(__file__).parent.parent / "ffmpeg_bin" / "ffprobe.exe")
-    if not Path(local_ffprobe).exists():
-        local_ffprobe = "ffprobe"
     cmd = [
-        local_ffprobe, "-v", "quiet", "-show_entries", "format=duration",
+        get_ffprobe_path(), "-v", "quiet", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", audio_path,
     ]
     result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")

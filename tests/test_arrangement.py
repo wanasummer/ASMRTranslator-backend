@@ -868,6 +868,79 @@ class ArrangementTests(unittest.TestCase):
         self.assertEqual(result.audio[1250:1500].rms, 0)
         self.assertEqual(result.audio[3000:3400].rms, 0)
 
+    def test_audio_binary_resolution_prefers_resources_and_falls_back_to_path(self):
+        import os
+        import sys
+        from modules.audio_splitter import _binary_names, _resolve_audio_binary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            onefile_module = root / "temp_onefile" / "modules" / "audio_splitter.py"
+            onefile_module.parent.mkdir(parents=True)
+            onefile_module.write_text("", encoding="utf-8")
+            fake_exe = root / "temp_onefile" / "python.exe"
+
+            app_dir = root / "app"
+            app_ffmpeg_dir = app_dir / "ffmpeg_bin"
+            app_ffmpeg_dir.mkdir(parents=True)
+            res_ffmpeg_dir = root / "app_res" / "resources" / "ffmpeg_bin"
+            res_ffmpeg_dir.mkdir(parents=True)
+            env_ffmpeg_dir = root / "injected"
+            env_ffmpeg_dir.mkdir(parents=True)
+            path_dir = root / "system_path"
+            path_dir.mkdir(parents=True)
+
+            ffmpeg_name = _binary_names("ffmpeg")[0]
+            ffprobe_name = _binary_names("ffprobe")[0]
+            for folder in (app_ffmpeg_dir, res_ffmpeg_dir, env_ffmpeg_dir, path_dir):
+                (folder / ffmpeg_name).write_bytes(b"bin")
+                (folder / ffprobe_name).write_bytes(b"bin")
+
+            with patch.object(sys, "executable", str(fake_exe)), \
+                 patch.object(sys, "argv", [str(app_dir / "main.exe")]), \
+                 patch.dict(os.environ, {"ASMR_FFMPEG_DIR": str(env_ffmpeg_dir), "PATH": str(path_dir)}):
+                self.assertEqual(_resolve_audio_binary("ffmpeg", onefile_module), str(env_ffmpeg_dir / ffmpeg_name))
+                self.assertEqual(_resolve_audio_binary("ffprobe", onefile_module), str(env_ffmpeg_dir / ffprobe_name))
+                self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(env_ffmpeg_dir))
+
+            with patch.object(sys, "executable", str(fake_exe)), \
+                 patch.object(sys, "argv", [str(app_dir / "main.exe")]), \
+                 patch.dict(os.environ, {"ASMR_FFMPEG_DIR": "", "PATH": str(path_dir)}):
+                self.assertEqual(_resolve_audio_binary("ffmpeg", onefile_module), str(app_ffmpeg_dir / ffmpeg_name))
+
+            with patch.object(sys, "executable", str(fake_exe)), \
+                 patch.object(sys, "argv", [str(root / "app_res" / "main.exe")]), \
+                 patch.dict(os.environ, {"ASMR_FFMPEG_DIR": "", "PATH": str(path_dir)}):
+                self.assertEqual(_resolve_audio_binary("ffmpeg", onefile_module), str(res_ffmpeg_dir / ffmpeg_name))
+
+            with patch.object(sys, "executable", str(fake_exe)), \
+                 patch.object(sys, "argv", [str(root / "missing_app" / "main.exe")]), \
+                 patch.dict(os.environ, {"ASMR_FFMPEG_DIR": "", "PATH": str(path_dir)}), \
+                 patch("modules.audio_splitter.shutil.which", side_effect=lambda n: str(path_dir / n) if n == ffmpeg_name else None):
+                self.assertEqual(_resolve_audio_binary("ffmpeg", onefile_module), str(path_dir / ffmpeg_name))
+
+    def test_stretch_accepts_resolved_path_and_rejects_missing_ffmpeg(self):
+        from array import array
+        from pydub import AudioSegment
+
+        audio = AudioSegment(array("h", [1000] * 1000).tobytes(), sample_width=2, frame_rate=1000, channels=1)
+        stretched = AudioSegment(array("h", [1000] * 500).tobytes(), sample_width=2, frame_rate=1000, channels=1)
+        with tempfile.TemporaryDirectory() as directory:
+            ffmpeg_bin = Path(directory) / "ffmpeg.exe"
+            ffmpeg_bin.write_bytes(b"bin")
+            adapter = PydubArrangementAdapter()
+            with patch("modules.arrangement.audio.get_ffmpeg_path", return_value=str(ffmpeg_bin)), \
+                 patch("modules.arrangement.audio.subprocess.run") as run_mock, \
+                 patch("pydub.AudioSegment.from_wav", return_value=stretched):
+                result = adapter.stretch(audio, 500)
+            self.assertEqual(len(result), 500)
+            self.assertEqual(run_mock.call_args.args[0][0], str(ffmpeg_bin))
+
+            with patch("modules.arrangement.audio.get_ffmpeg_path", return_value=str(Path(directory) / "missing.exe")):
+                with self.assertRaises(ArrangementError) as ctx:
+                    adapter.stretch(audio, 500)
+            self.assertIn("未找到随应用提供的 ffmpeg", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

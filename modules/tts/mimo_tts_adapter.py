@@ -20,6 +20,7 @@ import httpx
 
 from ..network import NetworkPolicy, async_client
 
+from ..audio_splitter import get_ffmpeg_path
 from ..error import TTSError
 from ..io import open_write
 from .base import TTSAdapter
@@ -257,11 +258,7 @@ class MimoTTSAdapter(TTSAdapter):
         except ValueError:
             factor = 1.0
 
-        ffmpeg = str(
-            Path(__file__).parent.parent.parent / "ffmpeg_bin" / "ffmpeg.exe"
-        )
-        if not Path(ffmpeg).exists():
-            ffmpeg = "ffmpeg"
+        ffmpeg = get_ffmpeg_path()
 
         result = subprocess.run(
             [ffmpeg, "-y", "-i", src, "-filter:a", f"atempo={factor}", dst],

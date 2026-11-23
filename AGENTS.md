@@ -111,6 +111,7 @@ This file governs the Python backend rooted at `main.py`, including `modules/`,
 ## Tests and Verification
 
 - Put pure module tests in a matching `tests/test_<module>.py` file.
+- Put end-to-end packaged sidecar tests in `tests/packaged/test_<feature>.py` inheriting `PackagedSidecarTestCase` (`tests/packaged/harness.py`). These tests are auto-discovered and executed against the NSIS-installed `resources/main.exe` in a clean-room sandbox during release verification.
 - Test contracts and stage boundaries in addition to happy-path text examples.
 - Network calls, external APIs, subprocesses, and native integrations must be mocked
   in unit tests. Bundled deterministic runtime data may be exercised locally.

@@ -23,7 +23,7 @@ from mutagen.flac import Picture
 from mutagen.mp4 import MP4Cover
 from mutagen.wave import WAVE
 
-from .audio_splitter import get_ffmpeg_path
+from .audio_splitter import get_ffmpeg_path, get_ffprobe_path
 from .storage import save_bytes, save_json
 
 
@@ -171,7 +171,8 @@ class MutagenMetadataReader:
         # WAV RIFF INFO and untagged AAC are not exposed by Mutagen. Use the
         # same explicitly bundled executable location as the audio decoder.
         ffmpeg = Path(get_ffmpeg_path())
-        probe = str(ffmpeg.with_name("ffprobe.exe")) if ffmpeg.name == "ffmpeg.exe" else "ffprobe"
+        sibling = ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix.lower() == ".exe" else "ffprobe")
+        probe = str(sibling) if ffmpeg.name.lower() in ("ffmpeg.exe", "ffmpeg") and sibling.is_file() else get_ffprobe_path()
         result = self._runner(
             [probe, "-v", "error", "-show_entries", "format_tags:stream_tags",
              "-of", "json", source], capture_output=True, text=True,

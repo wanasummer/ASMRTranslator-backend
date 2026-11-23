@@ -6,6 +6,7 @@ from .chickenrice_adapter import ChickenRiceASRAdapter
 from .common_asr_adapter import CommonASRAdapter
 from .qwen_asr_adapter import FunASRAdapter, QwenAudio31ASRFlashAdapter
 from .mimo_asr_adapter import MimoASRAdapter
+from .deepseek_asr_adapter import DeepSeekASRAdapter
 from .moss_adapter import MossASRAdapter
 
 
@@ -17,6 +18,7 @@ _BUILTIN_BACKENDS: dict[str, type[ASRAdapter]] = {
     "qwen-audio-3.1-asr-flash": QwenAudio31ASRFlashAdapter,
     "fun-asr": FunASRAdapter,
     "mimo-asr": MimoASRAdapter,
+    "deepseek-asr": DeepSeekASRAdapter,
     "moss-transcribe-diarize": MossASRAdapter,
 }
 

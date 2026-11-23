@@ -24,6 +24,7 @@ from .chickenrice_adapter import ChickenRiceASRAdapter, ChickenRiceSubtitleResul
 from .common_asr_adapter import CommonASRAdapter, CommonASRDocumentResult
 from .qwen_asr_adapter import FunASRAdapter, QwenAudio31ASRFlashAdapter
 from .mimo_asr_adapter import MimoASRAdapter
+from .deepseek_asr_adapter import DeepSeekASRAdapter
 from .models import ASRSegment, ASRResult, AudioChunk, SentenceSegment
 from .no_speech import ASRNoSpeechError
 
@@ -47,4 +48,5 @@ __all__ = [
     "QwenAudio31ASRFlashAdapter",
     "FunASRAdapter",
     "MimoASRAdapter",
+    "DeepSeekASRAdapter",
 ]

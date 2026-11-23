@@ -8,25 +8,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Optional, overload
 
+from .audio_splitter import ensure_ffmpeg_on_path, get_ffmpeg_path
 from .storage import save_json
 
-
-# Ensure ffmpeg is on PATH before pydub imports
-_ffmpeg_dir = str(Path(__file__).parent.parent / "ffmpeg_bin")
-if _ffmpeg_dir not in os.environ.get("PATH", ""):
-    os.environ.setdefault("PATH", "")
-    os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ["PATH"]
-
+ensure_ffmpeg_on_path()
 
 from pydub import AudioSegment
-from .storage import save_json
-
-
-def get_ffmpeg_path() -> str:
-    local_path = Path(__file__).parent.parent / "ffmpeg_bin" / "ffmpeg.exe"
-    if local_path.exists():
-        return str(local_path)
-    return "ffmpeg"
 
 
 def _time_stretch(audio: AudioSegment, target_ms: int) -> AudioSegment:

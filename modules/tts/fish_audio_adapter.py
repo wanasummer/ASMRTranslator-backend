@@ -1,7 +1,7 @@
 """Fish Audio TTS adapter — cloud TTS with emotion tags.
 
 API docs: https://api.fish.audio/v1/tts
-Models: s2.1-pro-free (free), s2.1-pro (paid)
+Models: s2.1-pro-free (free), s2.1-pro (paid), drama-3 (paid, expressive)
 Auth:   Bearer token in Authorization header
 """
 
@@ -17,6 +17,7 @@ import httpx
 
 from ..network import NetworkPolicy, async_client
 
+from ..audio_splitter import get_ffmpeg_path
 from ..error import TTSError
 from ..io import open_write
 from .base import TTSAdapter
@@ -43,6 +44,7 @@ class FishAudioTTSAdapter(TTSAdapter):
     # Model name header values
     _MODEL_FREE = "s2.1-pro-free"
     _MODEL_PRO = "s2.1-pro"
+    _MODEL_DRAMA = "drama-3"
 
     def __init__(
         self,
@@ -60,7 +62,7 @@ class FishAudioTTSAdapter(TTSAdapter):
         Args:
             voice_map: Speaker→reference_id mapping.
             api_key: Fish Audio API key (defaults to FISH_API_KEY env var).
-            model: Model name ("s2.1-pro-free" or "s2.1-pro").
+            model: Model name ("s2.1-pro-free", "s2.1-pro", or "drama-3").
             reference_id: Default voice model reference ID (used when
                 voice_map doesn't match and no voice override given).
             latency: "normal", "balanced", or "interactive".
@@ -420,11 +422,7 @@ class FishAudioTTSAdapter(TTSAdapter):
         except ValueError:
             factor = 1.0
 
-        ffmpeg = str(
-            Path(__file__).parent.parent.parent / "ffmpeg_bin" / "ffmpeg.exe"
-        )
-        if not Path(ffmpeg).exists():
-            ffmpeg = "ffmpeg"
+        ffmpeg = get_ffmpeg_path()
 
         result = subprocess.run(
             [ffmpeg, "-y", "-i", src, "-filter:a", f"atempo={factor}", dst],

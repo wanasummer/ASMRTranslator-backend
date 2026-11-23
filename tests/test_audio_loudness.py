@@ -206,6 +206,8 @@ class AlignEndToEndTest(unittest.TestCase):
             # leaving the TTS file and cache path untouched.
             loud_samples = _silence_samples(50) + _sine_samples(0.9, 300) + _silence_samples(50)
             _write_wav(seg["segment_file"], loud_samples)
+            mtime = os.path.getmtime(out) + 1.0
+            os.utime(seg["segment_file"], (mtime, mtime))
 
             align_tts_to_original([seg], tts_volume=1.0)
             self.assertEqual(seg["tts_file"], out)  # same cache key, but must rebuild

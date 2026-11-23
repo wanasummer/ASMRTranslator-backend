@@ -23,6 +23,7 @@ import httpx
 
 from ..network import NetworkPolicy, sync_client
 
+from ..audio_splitter import get_ffmpeg_path
 from ..error import TTSError
 from ..io import open_write
 from .base import TTSAdapter
@@ -506,8 +507,7 @@ class IndexTTSAdapter(TTSAdapter):
         try:
             with open_write(temp_path, "wb") as target:
                 target.write(audio)
-            ffmpeg = Path(__file__).parent.parent.parent / "ffmpeg_bin" / "ffmpeg.exe"
-            executable = str(ffmpeg) if ffmpeg.exists() else "ffmpeg"
+            executable = get_ffmpeg_path()
             result = subprocess.run(
                 [executable, "-y", "-i", temp_path, output_path],
                 capture_output=True,

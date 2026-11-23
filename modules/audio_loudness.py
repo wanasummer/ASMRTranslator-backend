@@ -16,11 +16,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Ensure ffmpeg is on PATH before pydub imports (same pattern as audio_joiner)
-_ffmpeg_dir = str(Path(__file__).parent.parent / "ffmpeg_bin")
-if _ffmpeg_dir not in os.environ.get("PATH", ""):
-    os.environ.setdefault("PATH", "")
-    os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ["PATH"]
+from .audio_splitter import ensure_ffmpeg_on_path
+
+ensure_ffmpeg_on_path()
 
 from pydub import AudioSegment
 

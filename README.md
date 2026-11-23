@@ -47,7 +47,8 @@ uv run python main.py --help
 
 ```mermaid
 flowchart LR
-    Audio["原始音频"] --> VAD["VAD 人声检测"]
+    Audio["原始音频"] --> UVR["UVR 人声分离<br/>可选分析预处理"]
+    UVR --> VAD["VAD 人声检测"]
     VAD --> ASR["ASR 语音识别<br/>生成日语原文"]
 
     subgraph Qwen["Qwen 独立路线"]

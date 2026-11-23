@@ -223,9 +223,12 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
                 "qwenAsrWorkspaceId": "workspace",
             })
             await preflight._check_asr({"asrEngine": "mimo-asr", "mimoAsrApiKey": "mimo-key"})
+            await preflight._check_asr({"asrEngine": "deepseek-asr", "deepseekAsrApiKey": "ds-key"})
         self.assertEqual(seen[0][2], "Bearer qwen-key")
         self.assertIn("workspace.cn-beijing.maas.aliyuncs.com", seen[0][0])
         self.assertEqual(seen[1][1], "mimo-key")
+        self.assertEqual(seen[2][2], "Bearer ds-key")
+        self.assertEqual(seen[2][0], "https://api.deepseek.com/models")
 
     async def test_qwen_asr_requires_workspace_id(self):
         with self.assertRaisesRegex(preflight.PreflightError, "Workspace ID"):

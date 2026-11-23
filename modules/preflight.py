@@ -147,6 +147,17 @@ async def _check_asr(config: Mapping[str, Any]) -> None:
             )
         _raise_for_status(response, "MiMo ASR")
         return
+    if engine == "deepseek-asr":
+        api_key = _text(config, "deepseekAsrApiKey")
+        if not api_key:
+            raise PreflightError("DeepSeek ASR API Key 未配置")
+        async with async_client(client_factory=httpx.AsyncClient, timeout=120.0) as client:
+            response = await client.get(
+                "https://api.deepseek.com/models",
+                headers=_headers(api_key),
+            )
+        _raise_for_status(response, "DeepSeek ASR")
+        return
     if engine == "moss-transcribe-diarize":
         from .analysis_plugins import validate_endpoint
         endpoint = validate_endpoint(_endpoint(_text(config, "asrBaseUrl"), _port(config, "asrPort")))
