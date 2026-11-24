@@ -118,17 +118,41 @@ def write_timeline_recipe(audio_path: str, plan, output_dir: str) -> str:
     from .storage import initialize_project
     initialize_project(output_dir)
     work = Path(output_dir).resolve()
+    listen_mode = getattr(plan, "listen_mode", "overlay")
+    gap_ms = int(getattr(plan, "gap_ms", 200))
     clips, inputs = [], {}
     for clip in plan.clips:
-        relative = Path(clip.path).resolve().relative_to(work).as_posix()
-        inputs[relative] = file_digest(str(clip.path))
-        clips.append({"index": clip.index, "start_ms": clip.start_ms, "end_ms": clip.end_ms,
-                      "text": clip.text, "path": relative, "volume": clip.volume,
-                      "reference_start_ms": clip.reference_start_ms,
-                      "reference_end_ms": clip.reference_end_ms,
-                      "sample_start_ms": clip.sample_start_ms, "sample_end_ms": clip.sample_end_ms})
+        relative = None
+        if clip.path is not None:
+            relative = Path(clip.path).resolve().relative_to(work).as_posix()
+            inputs[relative] = file_digest(str(clip.path))
+        record = {"index": clip.index, "start_ms": clip.start_ms, "end_ms": clip.end_ms,
+                  "text": clip.text, "path": relative, "volume": clip.volume,
+                  "reference_start_ms": clip.reference_start_ms,
+                  "reference_end_ms": clip.reference_end_ms,
+                  "sample_start_ms": clip.sample_start_ms, "sample_end_ms": clip.sample_end_ms}
+        if listen_mode == "dual":
+            orig_relative = None
+            if clip.original_path is not None:
+                orig_relative = Path(clip.original_path).resolve().relative_to(work).as_posix()
+                inputs[orig_relative] = file_digest(str(clip.original_path))
+            record.update({
+                "block_id": clip.block_id,
+                "dual_original_start_ms": clip.dual_original_start_ms,
+                "dual_original_end_ms": clip.dual_original_end_ms,
+                "dual_tts_start_ms": clip.dual_tts_start_ms,
+                "dual_tts_end_ms": clip.dual_tts_end_ms,
+                "original_sample_start_ms": clip.original_sample_start_ms,
+                "original_sample_end_ms": clip.original_sample_end_ms,
+                "original_deleted": clip.original_deleted,
+                "tts_deleted": clip.tts_deleted,
+                "trailing_gap_ms": clip.trailing_gap_ms,
+                "original_path": orig_relative,
+            })
+        clips.append(record)
     return save_json(str(work / RECIPE_PATH), {
-        "contractVersion": 2, "renderer": "arrangement", "source": _source_record(audio_path, work),
+        "contractVersion": 2, "renderer": "arrangement", "listenMode": listen_mode, "gapMs": gap_ms,
+        "source": _source_record(audio_path, work),
         "globalLoudness": plan.global_loudness, "clips": clips, "inputs": inputs,
     })
 
@@ -203,14 +227,27 @@ def _append_pcm(output, data: np.ndarray, crossfade: int, overlap: int, channels
 def _render_arrangement_input(recipe: dict, work: Path, folder: Path) -> list[str]:
     """Render a contract-2 timeline with the same adapter the studio export uses."""
     from .arrangement import ArrangedClip, ArrangementPlan, create_arrangement_audio_adapter
+    listen_mode = recipe.get("listenMode", "overlay")
+    gap_ms = int(recipe.get("gapMs", 200))
     clips = []
     for clip in recipe["clips"]:
-        if clip["path"] not in recipe["inputs"]:
+        raw_path = clip.get("path")
+        if raw_path is not None and raw_path not in recipe["inputs"]:
             raise HighQualityExportError("TTS 路径缺少完整性记录。")
-        clips.append(ArrangedClip(**{**clip, "path": work / clip["path"]}))
-    plan = ArrangementPlan(Path(recipe["source"]["path"]), tuple(clips), bool(recipe.get("globalLoudness")))
+        raw_orig = clip.get("original_path")
+        if raw_orig is not None and raw_orig not in recipe["inputs"]:
+            raise HighQualityExportError("原声切片路径缺少完整性记录。")
+        fields = {**clip, "path": (work / raw_path) if raw_path is not None else None}
+        if "original_path" in fields:
+            fields["original_path"] = (work / raw_orig) if raw_orig is not None else None
+        clips.append(ArrangedClip(**fields))
+    plan = ArrangementPlan(Path(recipe["source"]["path"]), tuple(clips),
+                           bool(recipe.get("globalLoudness")), listen_mode=listen_mode, gap_ms=gap_ms)
     rendered = folder / "arranged.wav"
-    create_arrangement_audio_adapter().render(plan).audio.export(rendered, format="wav")
+    adapter = (create_arrangement_audio_adapter()
+               if listen_mode == "overlay"
+               else create_arrangement_audio_adapter(listen_mode))
+    adapter.render(plan).audio.export(rendered, format="wav")
     return ["-i", str(rendered)]
 
 

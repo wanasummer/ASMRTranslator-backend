@@ -36,18 +36,26 @@ class TimelineRenderTests(unittest.TestCase):
              "original_start_ms": 6000, "original_end_ms": 7000},
         ]
 
-    def test_only_follow_original_overlay_modes_render_on_the_timeline(self):
-        self.assertTrue(create_segment_builder(phantom_mode=True, sync_mode="follow_original").timeline_render)
-        self.assertTrue(create_segment_builder(retain_original=True, sync_mode="follow_original").timeline_render)
-        self.assertFalse(create_segment_builder(phantom_mode=True, sync_mode="follow_translation").timeline_render)
-        self.assertFalse(create_segment_builder(retain_original=True).timeline_render)
-        self.assertFalse(create_segment_builder().timeline_render)
+    def test_only_overlay_follow_original_and_dual_modes_resolve_timeline_listen_mode(self):
+        self.assertEqual(create_segment_builder(phantom_mode=True, sync_mode="follow_original").listen_mode, "overlay")
+        self.assertEqual(create_segment_builder(retain_original=True, sync_mode="follow_original").listen_mode, "overlay")
+        self.assertEqual(create_segment_builder(retain_original=True).listen_mode, "dual")
+        self.assertIsNone(create_segment_builder(phantom_mode=True, sync_mode="follow_translation").listen_mode)
+        self.assertIsNone(create_segment_builder().listen_mode)
 
     def test_processed_voice_is_what_studio_and_arrangement_read(self):
+        (self.work / "chunk_0/02_tts/tts_0000.mp3").write_bytes(b"raw")
+        artifact = self.work / "chunk_0/02_tts/artifact_tts_0000.mp3"
+        artifact.write_bytes(b"artifact-clean")
+        self.assertEqual(cached_tts(self.work, 0), self.work / "chunk_0/02_tts/phantom_dsp_0000.wav")
+        (self.work / "chunk_0/02_tts/phantom_dsp_0000.wav").unlink()
+        self.assertEqual(cached_tts(self.work, 0), artifact)
+        AudioSegment.silent(duration=10000, frame_rate=24000).export(
+            self.work / "chunk_0/02_tts/phantom_dsp_0000.wav", format="wav"
+        )
         published = publish_voice_assets(self.segments, self.work)
         self.assertEqual(published, {0: self.work / "chunk_0/02_tts/voice_0000.wav"})
         self.assertFalse((self.work / "chunk_0/02_tts/voice_0001.wav").exists())
-        (self.work / "chunk_0/02_tts/tts_0000.mp3").write_bytes(b"raw")
         self.assertEqual(cached_tts(self.work, 0), published[0])
         self.assertEqual(len(AudioSegment.from_file(published[0])), 10000)
 
@@ -68,6 +76,37 @@ class TimelineRenderTests(unittest.TestCase):
         self.assertEqual([(p.block_id, p.subtitle_start_ms, p.subtitle_end_ms) for p in result.placements],
                          [("7", 0, 2000), ("13", 6000, 7000)])
 
+    def test_renders_dual_draft_with_the_dual_arrangement_policy(self):
+        from dataclasses import replace as dc_replace
+        orig_seg = self.work / "chunk_0/01_segments/seg_0000.wav"
+        orig_seg.parent.mkdir(parents=True, exist_ok=True)
+        AudioSegment.silent(duration=2000, frame_rate=24000).export(orig_seg, format="wav")
+        adapter, audio = Mock(), Mock()
+
+        def fake_render(plan):
+            rendered = tuple(
+                dc_replace(clip, start_ms=100 * idx, end_ms=100 * idx + 12200)
+                for idx, clip in enumerate(plan.clips)
+            )
+            return ArrangementAudioResult(audio, rendered, 0)
+
+        adapter.render.side_effect = fake_render
+        result = render_initial_timeline(
+            self.segments, str(self.work), "source.wav",
+            TimelineRenderConfig(1.2, .85, listen_mode="dual", gap_ms=200), adapter,
+        )
+        plan = adapter.render.call_args.args[0]
+        self.assertEqual(plan.listen_mode, "dual")
+        self.assertEqual(plan.gap_ms, 200)
+        self.assertEqual(len(result.plan.clips), 2)
+        first, second = result.plan.clips
+        self.assertEqual((first.dual_original_start_ms, first.dual_original_end_ms), (0, 2000))
+        self.assertEqual((first.dual_tts_start_ms, first.dual_tts_end_ms), (2200, 12200))
+        self.assertEqual(first.original_path, orig_seg)
+        self.assertTrue(second.tts_deleted)
+        self.assertEqual([(p.block_id, p.start_ms, p.end_ms) for p in result.placements],
+                         [("7", 0, 12200), ("13", 100, 12300)])
+
     def test_pipeline_routes_timeline_modes_through_the_renderer_only(self):
         from modules.pipeline import run_pipeline
         from modules.audio_joiner import SegmentPlacement
@@ -83,11 +122,11 @@ class TimelineRenderTests(unittest.TestCase):
             segments = [{"index": 0, "tts_file": "voice.wav"}]
             chain = Mock()
             chain.run.return_value = segments
-            builder = Mock(subdir="built", timeline_render=True)
+            builder = Mock(subdir="built", listen_mode="dual", gap_ms=250)
 
             def render(items, output_dir, audio_path, config):
                 self.assertIs(items, segments)
-                self.assertEqual(config, TimelineRenderConfig(1.15, .5))
+                self.assertEqual(config, TimelineRenderConfig(1.15, .5, listen_mode="dual", gap_ms=250))
                 Path(output_dir, "output.wav").write_bytes(b"wav")
                 Path(output_dir, "output.mp3").write_bytes(b"mp3")
                 return TimelineRender(str(Path(output_dir, "output.wav")),

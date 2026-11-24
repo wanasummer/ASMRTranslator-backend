@@ -12,7 +12,7 @@ Extending with a new mode:
 """
 
 from abc import ABC, abstractmethod
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 from .audio_joiner import build_dual_segments, build_sync_segments
 from .phantom_engine import build_phantom_segments
@@ -38,9 +38,9 @@ class SegmentBuilder(ABC):
     wav_params: list[str] | None = None
 
     @property
-    def timeline_render(self) -> bool:
-        """True when the final mix is the studio arrangement of the untouched draft."""
-        return False
+    def listen_mode(self) -> Optional[str]:
+        """Arrangement listen mode when rendered on the studio timeline, else None."""
+        return None
 
     @abstractmethod
     def export_settings(self) -> BuilderExportSettings:
@@ -85,6 +85,10 @@ class DualBuilder(SegmentBuilder):
     def __init__(self, gap_ms: int = 200):
         self.gap_ms = gap_ms
 
+    @property
+    def listen_mode(self) -> Optional[str]:
+        return "dual"
+
     def build(self, segments, output_dir, max_workers=4):
         return build_dual_segments(segments, output_dir,
                                    gap_ms=self.gap_ms, max_workers=max_workers,
@@ -105,8 +109,8 @@ class SyncBuilder(SegmentBuilder):
         self.follow_original_rate = follow_original_rate
 
     @property
-    def timeline_render(self) -> bool:
-        return self.sync_mode == "follow_original"
+    def listen_mode(self) -> Optional[str]:
+        return "overlay" if self.sync_mode == "follow_original" else None
 
     def build(self, segments, output_dir, max_workers=4):
         return build_sync_segments(segments, output_dir,
@@ -139,8 +143,8 @@ class PhantomBuilder(SegmentBuilder):
         self.virtual_fade = virtual_fade
 
     @property
-    def timeline_render(self) -> bool:
-        return self.sync_mode == "follow_original"
+    def listen_mode(self) -> Optional[str]:
+        return "overlay" if self.sync_mode == "follow_original" else None
 
     def build(self, segments, output_dir, max_workers=4):
         return build_phantom_segments(

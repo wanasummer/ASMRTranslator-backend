@@ -96,9 +96,9 @@ class RenderedTake:
     index: int
     text: str
     path: str
-    start_ms: int
-    end_ms: int
-    sample_end_ms: int
+    start_ms: int | None
+    end_ms: int | None
+    sample_end_ms: int | None
     tts: dict | None = None
 
 

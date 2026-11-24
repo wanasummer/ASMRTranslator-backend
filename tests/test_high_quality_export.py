@@ -166,6 +166,71 @@ class NativeAudioTests(unittest.TestCase):
             with self.assertRaises(HighQualityExportError):
                 load_recipe(path)
 
+    def test_dual_timeline_recipe_rerenders_dual_plan_with_original_slices(self):
+        from modules.arrangement import ArrangedClip, ArrangementPlan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "original.wav"
+            seg = root / "chunk_0/01_segments/seg_0000.wav"
+            voice = root / "chunk_0/02_tts/voice_0000.wav"
+            seg.parent.mkdir(parents=True)
+            voice.parent.mkdir(parents=True)
+            source.write_bytes(b"original")
+            seg.write_bytes(b"orig-slice")
+            voice.write_bytes(b"voice")
+            dual_clip = ArrangedClip(
+                7, 0, 3500, "你好", voice, 1.0, 0, 1000, 0, 2300,
+                block_id="row-7",
+                dual_original_start_ms=0, dual_original_end_ms=1000,
+                dual_tts_start_ms=1200, dual_tts_end_ms=3500,
+                original_sample_start_ms=0, original_sample_end_ms=1000,
+                original_deleted=False, tts_deleted=False, trailing_gap_ms=0,
+                original_path=seg,
+            )
+            skipped_clip = ArrangedClip(
+                8, 3500, 4000, "嗯", None, 1.0, 1000, 1500, 0, None,
+                block_id="row-8",
+                dual_original_start_ms=0, dual_original_end_ms=500,
+                dual_tts_start_ms=None, dual_tts_end_ms=None,
+                original_sample_start_ms=0, original_sample_end_ms=500,
+                original_deleted=False, tts_deleted=True, trailing_gap_ms=0,
+                original_path=None,
+            )
+            plan = ArrangementPlan(source, (dual_clip, skipped_clip), False, listen_mode="dual", gap_ms=200)
+            path = write_timeline_recipe(str(source), plan, directory)
+            recipe, work = load_recipe(path)
+            self.assertEqual((recipe["listenMode"], recipe["gapMs"]), ("dual", 200))
+            self.assertEqual(recipe["clips"][0]["original_path"], "chunk_0/01_segments/seg_0000.wav")
+            self.assertIsNone(recipe["clips"][1]["path"])
+            adapter, factory = Mock(), Mock()
+            factory.return_value = adapter
+            target = root / "output.wav"
+
+            def command(args):
+                target.write_bytes(b"encoded")
+                return b""
+
+            with (patch("modules.arrangement.create_arrangement_audio_adapter", factory),
+                  patch("modules.high_quality_export.probe_audio",
+                        return_value=AudioProfile(44100, 2, 16, "pcm_s16le", 0)),
+                  patch("modules.high_quality_export._command", side_effect=command),
+                  patch("modules.audio_metadata.create_metadata_reader"),
+                  patch("modules.audio_metadata.write_audio_metadata")):
+                render_high_quality(path, str(target))
+            from dataclasses import replace as dc_replace
+            factory.assert_called_once_with("dual")
+            rendered = adapter.render.call_args.args[0]
+            self.assertEqual((rendered.listen_mode, rendered.gap_ms), ("dual", 200))
+            self.assertEqual(rendered.clips[0], dc_replace(
+                dual_clip,
+                path=work / "chunk_0/02_tts/voice_0000.wav",
+                original_path=work / "chunk_0/01_segments/seg_0000.wav",
+            ))
+            self.assertEqual(rendered.clips[1], skipped_clip)
+            seg.write_bytes(b"tampered")
+            with self.assertRaises(HighQualityExportError):
+                load_recipe(path)
+
 
 if __name__ == "__main__":
     unittest.main()

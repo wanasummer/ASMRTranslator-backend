@@ -886,8 +886,11 @@ def run_pipeline(
             os.path.join(work_dir, "02_tts"),
             max_workers=pool_cfg.build_workers,
         )
-        timeline_render = getattr(builder, "timeline_render", False) is True
-        if not timeline_render:
+        listen_mode = getattr(builder, "listen_mode", None)
+        use_timeline = listen_mode in ("overlay", "dual")
+        if not use_timeline:
+            from .timeline_render import publish_voice_assets
+            _required_stage("OUTPUT_WRITE_DENIED", publish_voice_assets, segments, Path(output_dir))
             segments = _required_stage("AUDIO_DSP_FAILED", align_tts_to_original,
                 segments, tts_volume=tts_volume, max_workers=pool_cfg.build_workers
             )
@@ -922,11 +925,18 @@ def run_pipeline(
         ps("Joining processed segments into final audio...")
         print_progress("concat", "正在合并最终文件", 0, 1)
         final_output = os.path.join(output_dir, "output.wav")
-        if timeline_render:
+        if use_timeline:
             from .timeline_render import TimelineRenderConfig, render_initial_timeline
-            joined = _required_stage("AUDIO_JOIN_FAILED", render_initial_timeline,
-                                     all_segments, output_dir, audio_path,
-                                     TimelineRenderConfig(min(1.25, follow_original_rate), tts_volume))
+            joined = _required_stage(
+                "AUDIO_JOIN_FAILED", render_initial_timeline,
+                all_segments, output_dir, audio_path,
+                TimelineRenderConfig(
+                    min(1.25, follow_original_rate),
+                    tts_volume,
+                    listen_mode=listen_mode,
+                    gap_ms=getattr(builder, "gap_ms", 200),
+                ),
+            )
         else:
             joined = _required_stage("AUDIO_JOIN_FAILED", join_audio,
                                      all_segments, final_output, crossfade_ms=crossfade_ms,
@@ -986,7 +996,7 @@ def run_pipeline(
             from .error import ExportError, descriptor
             raise ExportError(descriptor("SUBTITLE_FINAL_EMPTY"), detail=str(error), cause=error) from error
         from .high_quality_export import write_export_recipe, write_timeline_recipe
-        if timeline_render:
+        if use_timeline:
             result["high_quality_recipe"] = _required_stage(
                 "OUTPUT_WRITE_DENIED", write_timeline_recipe, audio_path, joined.plan, output_dir)
         else:

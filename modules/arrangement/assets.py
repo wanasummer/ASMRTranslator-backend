@@ -29,6 +29,8 @@ def voice_asset_path(work: Path, position: int) -> Path:
 def cached_tts(work: Path, position: int) -> Path | None:
     # Matches the studio audio track lookup order; never confuse index with position.
     candidates = (voice_asset_path(work, position),
+                  work / f"chunk_0/02_tts/phantom_dsp_{position:04d}.wav",
+                  *(work / f"chunk_0/02_tts/artifact_tts_{position:04d}.{extension}" for extension in ("mp3", "wav")),
                   *(work / f"chunk_0/02_tts/tts_{position:04d}.{extension}" for extension in ("mp3", "wav")))
     return next((path for path in candidates if path.is_file()), None)
 

@@ -35,9 +35,13 @@ def adopt_rendered_takes(work: Path, takes: Sequence[RenderedTake]) -> int:
             replacement = {"path": take.path, "text": take.text}
             if take.tts is not None:
                 replacement["tts"] = take.tts
-            edit.update(replacement=replacement,
-                        interval={"start": take.start_ms, "end": take.end_ms},
-                        ttsSample={"start": 0, "end": take.sample_end_ms})
+            edit.update(
+                replacement=replacement,
+                interval={"start": take.start_ms, "end": take.end_ms}
+                if take.start_ms is not None and take.end_ms is not None else None,
+                ttsSample={"start": 0, "end": take.sample_end_ms}
+                if take.sample_end_ms is not None else None,
+            )
             ledger[str(take.index)] = {"text": take.text, "tts": take.tts, "before": before,
                                        "after": {field: edit[field] for field in _AUDIO_FIELDS}}
         if ledger:

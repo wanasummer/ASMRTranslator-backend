@@ -80,6 +80,24 @@ class RenderedTakeTests(unittest.TestCase):
         saved = self._save(edited)["segments"][0]
         self.assertEqual((saved["replacement"], saved["interval"]), (None, {"start": 100, "end": 1500}))
 
+    def test_dual_mode_takes_keep_overlay_interval_empty(self):
+        state = initial_state(self.work)
+        state["segments"][0]["text"] = "第一段拉长之后超过第二段原声起点"
+        state["segments"][1]["text"] = "第二段也重新生成"
+        save_state(self.work, state)
+        with patch("modules.arrangement.plan.synthesize_edit", new=AsyncMock(return_value={"path": self.take.path, "text": "合成"})), \
+             patch("pydub.AudioSegment.from_file", return_value=MagicMock(__len__=lambda _: 4500)):
+            plan = prepare_arrangement_plan(
+                self.work, Path("original.wav"), state,
+                {"retainOriginal": True, "syncEnabled": False, "phantomMode": False}, {},
+            )
+        self.assertEqual(len(plan.takes), 2)
+        self.assertTrue(all(t.start_ms is None and t.end_ms is None and t.sample_end_ms is None for t in plan.takes))
+        self.assertEqual(adopt_rendered_takes(self.work, plan.takes), 2)
+        adopted = load_state(self.work)
+        self.assertIsNone(adopted["segments"][0]["interval"])
+        self.assertIsNone(adopted["segments"][0]["ttsSample"])
+
 
 if __name__ == "__main__":
     unittest.main()

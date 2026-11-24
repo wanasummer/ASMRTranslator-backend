@@ -114,6 +114,7 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
     max_rate = tts_max_rate(config)
     voice_volume = tts_volume(config)
     listen_mode = resolve_listen_mode(config)
+    gap_ms = max(0, int(config.get("dualGapMs", 200)))
     clips, takes, dual_entries = [], [], []
     reused = replaced = 0
     previous_end = -math.inf
@@ -226,11 +227,16 @@ def prepare_arrangement_plan(work: Path, source_audio: Path, state: ArrangementS
             clips.append(ArrangedClip(baseline["index"], start, end, edit["text"], path, volume,
                                       ref_start, ref_end, sample_start, sample_end))
         if fresh_take and path is not None:
-            takes.append(RenderedTake(edit["index"], edit["text"], replacement["path"], start, end, sample_end,
-                                      fragment_tts(edit)))
+            takes.append(RenderedTake(
+                edit["index"], edit["text"], replacement["path"],
+                None if listen_mode == "dual" else start,
+                None if listen_mode == "dual" else end,
+                None if listen_mode == "dual" else sample_end,
+                fragment_tts(edit),
+            ))
     if listen_mode == "dual":
-        clips = _resolve_dual_entries(dual_entries)
+        clips = _resolve_dual_entries(dual_entries, gap_ms=gap_ms)
     deleted = sum(bool(edit.get("deleted", False)) for edit in state["segments"])
     inserted = len(state["segments"]) - len(rows)
     print(f"[arrangement] 共 {len(rows)} 段，新增 {inserted} 段，删除 {deleted} 段，复用 TTS 缓存 {reused} 段，替换 {replaced} 段")
-    return ArrangementPlan(source_audio, tuple(clips), False, tuple(takes), listen_mode=listen_mode)
+    return ArrangementPlan(source_audio, tuple(clips), False, tuple(takes), listen_mode=listen_mode, gap_ms=gap_ms)
