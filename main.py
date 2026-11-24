@@ -54,6 +54,7 @@ _load_dotenv()
 # Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from modules.asr.factory import get_available_asr_backends
 from modules.pipeline import run_pipeline
 from modules.error import ConfigurationError, PipelineError, descriptor, unexpected_error
 from modules.error_reporter import report_error_async
@@ -83,7 +84,8 @@ def _emit_result(result: dict) -> None:
     ), flush=True)
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for main.py."""
     parser = argparse.ArgumentParser(
         description="ASMRTranslator - Japanese ASMR → Chinese Dubbing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -239,7 +241,7 @@ Examples:
                              '"api_key":"...","model":"gpt-4o-mini"}. When provided, the '
                              'parsed subtitles are optimized before TTS.')
     parser.add_argument("--asr-backend", type=str, default="fish-asr",
-                        choices=["fish-asr", "qwen-audio-3.1-asr-flash", "fun-asr", "mimo-asr", "chickenrice", "common-asr", "moss-transcribe-diarize"],
+                        choices=get_available_asr_backends(),
                         help="ASR engine used to generate subtitles when no VTT "
                              "file is provided (default: fish-asr)")
     parser.add_argument("--asr-kwargs", type=str, default=None,
@@ -299,7 +301,11 @@ Examples:
                         help="Re-split window length (s) for over-long slices (default: 20.0)")
     parser.add_argument("--vad-split-overlap-sec", type=float, default=4.0,
                         help="Overlap (s) between adjacent re-split windows (default: 4.0)")
+    return parser
 
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.arrangement_editor or args.arrangement_run:

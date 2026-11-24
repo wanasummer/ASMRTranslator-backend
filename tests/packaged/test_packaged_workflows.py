@@ -177,6 +177,10 @@ class PackagedWorkflowTests(PackagedSidecarTestCase):
         self.assertTrue((out_dir / "output.wav").is_file())
         self.assertTrue(any(r.path == "/asr/job" for r in self.stub.requests))
 
+    def test_cli_help_lists_deepseek_asr_backend(self) -> None:
+        res = self.run_sidecar(["--help"], inject_env=False)
+        self.assertIn("deepseek-asr", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
