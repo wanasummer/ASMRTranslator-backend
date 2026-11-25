@@ -31,8 +31,9 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     """Rebuild the edited studio timeline from an immutable task snapshot."""
     from contextlib import redirect_stdout
     from uuid import uuid4
-    from .arrangement import (ArrangementError, adopt_rendered_takes, create_arrangement_audio_adapter,
-                              prepare_arrangement_plan, publish_subtitle_base, write_arrangement_result)
+    from .arrangement import (ArrangementError, adopt_rendered_takes, cleanup_arrangement_runs,
+                              create_arrangement_audio_adapter, prepare_arrangement_plan,
+                              publish_subtitle_base, write_arrangement_result)
     work = Path(payload["workDir"])
     output = work / "arrangement/runs" / uuid4().hex
     log_path = address(output / "arrangement.log").reference
@@ -59,6 +60,7 @@ def run_arrangement_pipeline(payload: dict) -> dict:
     from .run_results import record_arrangement_run
     _required_stage("OUTPUT_WRITE_DENIED", record_arrangement_run, work, output, payload["state"], files)
     _required_stage("OUTPUT_WRITE_DENIED", publish_subtitle_base, work, payload["state"])
+    cleanup_arrangement_runs(work, keep=output)
     return {**files, "log_path": str(log_path)}
 
 
@@ -763,6 +765,8 @@ def run_pipeline(
             run_result = _required_stage(
                 "OUTPUT_WRITE_DENIED", record_run, output_dir, "succeeded", audio_path,
                 output_mode="subtitles-only")
+            from .arrangement import cleanup_arrangement_runs
+            cleanup_arrangement_runs(Path(output_dir))
             print_progress("subtitle.export", "正在生成最终字幕", 1, 1)
             elapsed = time.time() - start_time
             print(f"       [subtitle.export] {len(cues)} cues → {final_vtt}")
@@ -1006,6 +1010,8 @@ def run_pipeline(
         from .run_results import record_run
         result["run_result"] = _required_stage(
             "OUTPUT_WRITE_DENIED", record_run, output_dir, "succeeded", audio_path)
+        from .arrangement import cleanup_arrangement_runs
+        cleanup_arrangement_runs(Path(output_dir))
         return result
 
     except Exception as raw_error:

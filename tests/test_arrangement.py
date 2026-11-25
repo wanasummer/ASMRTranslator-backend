@@ -602,6 +602,39 @@ class ArrangementTests(unittest.TestCase):
         from modules.storage import read_log
         self.assertIn("重新编排完成", read_log(output["log_path"]))
 
+    def test_pipeline_cleans_up_previous_arrangement_runs_silently(self):
+        from modules.arrangement import cleanup_arrangement_runs
+        stale_one = self.work / "arrangement/runs/stale-run-1"
+        stale_two = self.work / "arrangement/runs/stale-run-2"
+        stale_one.mkdir(parents=True)
+        stale_two.mkdir(parents=True)
+        (stale_one / "output.wav").write_bytes(b"wav")
+        (stale_two / "output.mp3").write_bytes(b"mp3")
+
+        plan = ArrangementPlan(Path("source.wav"), (), False)
+        result = ArrangementAudioResult(object(), ())
+        adapter = MagicMock()
+        adapter.render.return_value = result
+        payload = {"workDir": str(self.work), "audioPath": "source.wav", "state": self.state, "config": {}, "ttsKwargs": {}}
+
+        def write_current(_, directory: Path, __):
+            directory.mkdir(parents=True, exist_ok=True)
+            mp3 = directory / "output.mp3"
+            mp3.write_bytes(b"new-mp3")
+            return {"output_mp3": str(mp3)}
+
+        with patch("modules.arrangement.prepare_arrangement_plan", return_value=plan), \
+                patch("modules.arrangement.create_arrangement_audio_adapter", return_value=adapter), \
+                patch("modules.arrangement.write_arrangement_result", side_effect=write_current):
+            output = run_arrangement_pipeline(payload)
+
+        remaining = [p.name for p in (self.work / "arrangement/runs").iterdir()]
+        self.assertEqual(remaining, [Path(output["output_mp3"]).parent.name])
+        with patch("modules.arrangement.audio.shutil.rmtree", side_effect=PermissionError("locked")):
+            self.assertEqual(cleanup_arrangement_runs(self.work), 0)
+        self.assertEqual(cleanup_arrangement_runs(self.work), 1)
+        self.assertEqual(list((self.work / "arrangement/runs").iterdir()), [])
+
     def test_tts_readability_rules_are_shared_with_existing_optimization(self):
         for backend in ("edge-tts", "fish-audio", "minimax-tts"):
             prompt = build_polish_system("", backend, "speech-2.8-hd")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import math
+import shutil
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -237,3 +238,38 @@ def write_arrangement_result(result: ArrangementAudioResult, directory: Path, sn
     vtt = "WEBVTT\n\n" + "\n\n".join(f"{clip.index}\n{stamp(clip.start_ms + result.origin_shift_ms)} --> {stamp(clip.end_ms + result.origin_shift_ms)}\n{clip.text}" for clip in result.clips) + "\n"
     path = save_text(str(directory / "final.vtt"), vtt)
     return {"output_wav": str(wav), "output_mp3": str(mp3), "final_vtt": path}
+
+
+def cleanup_arrangement_runs(work: Path, keep: Path | None = None) -> int:
+    """Best-effort removal of superseded arrangement run directories; never raises."""
+    runs_dir = work / "arrangement/runs"
+    try:
+        if not runs_dir.is_dir():
+            return 0
+        entries = list(runs_dir.iterdir())
+    except OSError:
+        return 0
+    keep_resolved = None
+    if keep is not None:
+        try:
+            keep_resolved = keep.resolve()
+        except OSError:
+            keep_resolved = keep
+    removed = 0
+    for entry in entries:
+        try:
+            if keep_resolved is not None and entry.resolve() == keep_resolved:
+                continue
+        except OSError:
+            if keep is not None and entry.name == keep.name:
+                continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+            if not entry.exists():
+                removed += 1
+        except OSError:
+            continue
+    return removed
